@@ -12,6 +12,36 @@ WORKSPACE_DIR=$(pwd)
 export PATH="$HOME/.local/bin:$PATH"
 export HF_HOME="$HOME/.cache/huggingface"
 
+# ---------------------------------------------------------------------------
+# Interpreter resolution
+# ---------------------------------------------------------------------------
+# The project venv created in README step 2. Everything this script installs or
+# runs for MLflow/Streamlit must use THIS interpreter, not the system python3:
+# the AMD AI/ML Ready Image ships a system python3 with no pip and no ensurepip,
+# so bare `python3 -m pip` / `python3 -m mlflow` fail with
+# "No module named pip" / "No module named mlflow".
+VENV_PY="$WORKSPACE_DIR/env/bin/python"
+HERMES_ENV="$HOME/.hermes/.env"
+HERMES_ENV_TMP="$HOME/.hermes/.env.managed.$$"
+if [ ! -x "$VENV_PY" ]; then
+    echo "[ERROR] Project venv not found at $WORKSPACE_DIR/env." >&2
+    echo "        Run the README setup first:" >&2
+    echo "          sudo apt-get update && sudo apt-get install -y python3-venv" >&2
+    echo "          python3 -m venv env && source env/bin/activate" >&2
+    echo "          python -m pip install --upgrade pip && python -m pip install -r requirements.txt" >&2
+    exit 1
+fi
+
+# Preflight: docker is required (this script runs 'sudo docker' many times) and
+# is NOT present on the stock AMD AI/ML Ready Image.
+if ! command -v docker >/dev/null 2>&1; then
+    echo "[ERROR] docker is not installed, but this script requires it." >&2
+    echo "        Install it first:" >&2
+    echo "          sudo apt-get update && sudo apt-get install -y docker.io" >&2
+    echo "          sudo systemctl enable --now docker" >&2
+    exit 1
+fi
+
 HERMES_GPU="0"   # Muse-Glimmer-30B runs on GPU 0
 
 # vLLM image: built locally from the ROCm nightly with PR #51655 (Muse-Glimmer
@@ -239,10 +269,10 @@ fi
 # Hermes toolchain and MLflow integration
 # ===========================================================================
 echo "[INFO] Installing MLflow and OpenTelemetry dependencies..."
-python3 -m pip install -q mlflow==3.13.0 opentelemetry-sdk==1.42.1
+"$VENV_PY" -m pip install -q mlflow==3.13.0 opentelemetry-sdk==1.42.1
 
 echo "[INFO] Launching MLflow server on port 5004..."
-python3 -m mlflow server \
+"$VENV_PY" -m mlflow server \
   --host 0.0.0.0 \
   --port 5004 \
   --backend-store-uri sqlite:///mlflow.db \
@@ -321,9 +351,11 @@ else
     echo "[WARN] Patch did not apply cleanly (wrong plugin version or conflict)."
 fi
 
-# Install the plugin package in editable mode using standard python/pip
+# Install the plugin package in editable mode. Use the project venv explicitly:
+# the system python3 on this image has no pip, and in the verified run this step
+# resolved to the venv interpreter because the venv was active.
 echo "[INFO] Installing plugin package in editable mode..."
-python3 -m pip install -e .
+"$VENV_PY" -m pip install -e .
 
 cd "$WORKSPACE_DIR"
 
@@ -343,11 +375,40 @@ EOF
 
 hermes plugins enable hermes_otel --allow-tool-override
 
-$HOME/.hermes/hermes-agent/venv/bin/python -m ensurepip --upgrade
-$HOME/.hermes/hermes-agent/venv/bin/python -m pip install -q opentelemetry-api==1.42.1 opentelemetry-sdk==1.42.1 opentelemetry-exporter-otlp-proto-http==1.42.1 pyrsmi==1.1.0 amdsmi==7.0.2 mlflow==3.13.0 psutil requests cryptography
+# Install the OTel runtime deps into the venv that ACTUALLY runs Hermes.
+# The launcher at $(command -v hermes) execs a specific interpreter; resolve it
+# from the launcher instead of guessing a path. The old hardcoded
+# "$HOME/.hermes/hermes-agent/venv" does not exist for a standard install, so
+# these packages silently went nowhere and the plugin failed at runtime with
+# "OpenTelemetry import error: No module named 'opentelemetry.exporter'",
+# leaving MLflow with ZERO traces while every health check still passed.
+HERMES_BIN="$(command -v hermes || echo "$HOME/.local/bin/hermes")"
+HERMES_PY="$(grep -oE '"[^"]*/venv/bin/python"' "$HERMES_BIN" 2>/dev/null | head -1 | tr -d '"')"
+if [ -z "$HERMES_PY" ] || [ ! -x "$HERMES_PY" ]; then
+    for cand in /usr/local/lib/hermes-agent/venv/bin/python \
+                "$HOME/.hermes/hermes-agent/venv/bin/python"; do
+        [ -x "$cand" ] && HERMES_PY="$cand" && break
+    done
+fi
+
+if [ -n "$HERMES_PY" ] && [ -x "$HERMES_PY" ]; then
+    echo "[INFO] Installing OTel runtime into the Hermes venv: $HERMES_PY"
+    # This venv ships without pip, so bootstrap it before installing.
+    "$HERMES_PY" -m ensurepip --upgrade >/dev/null 2>&1
+    "$HERMES_PY" -m pip install -q opentelemetry-api==1.42.1 opentelemetry-sdk==1.42.1 opentelemetry-exporter-otlp-proto-http==1.42.1 pyrsmi==1.1.0 amdsmi==7.0.2 mlflow==3.13.0 psutil requests cryptography
+    # Verify the import the plugin actually performs, rather than trusting pip's exit code.
+    if "$HERMES_PY" -c "import opentelemetry.exporter.otlp.proto.http" >/dev/null 2>&1; then
+        echo "[OK] OpenTelemetry exporter importable by Hermes: traces will reach MLflow."
+    else
+        echo "[WARN] OTel exporter still not importable by $HERMES_PY. MLflow will show NO traces." >&2
+    fi
+else
+    echo "[WARN] Could not locate the Hermes venv interpreter. MLflow will show NO traces." >&2
+fi
 echo "[INFO] MLflow tracking available at http://${SYSTEM_IP}:5004/"
 
-cat << 'EOF' >> "$HOME/.hermes/.env"
+cat << EOF > "$HERMES_ENV_TMP"
+# >>> hermes-audio-notebook managed block >>>
 # MLflow and vLLM observability configuration
 MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING=false
 MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL=1
@@ -363,9 +424,78 @@ HERMES_GPU_EXPORTER_URL=http://localhost:5050/metrics
 HERMES_PROFILING_DEBUG=0
 MLFLOW_DISABLE_TELEMETRY=true
 HERMES_CPU_DEBUG=0
+HERMES_PROFILING_OUTPUT_DIR=${WORKSPACE_DIR}/outputs
+# <<< hermes-audio-notebook managed block <<<
 EOF
 
-echo "HERMES_PROFILING_OUTPUT_DIR=${WORKSPACE_DIR}/outputs" >> "$HOME/.hermes/.env"
+# Rewrite the managed block in place so repeated runs stay idempotent. The old
+# version used '>>' unconditionally, so every run appended another copy of every
+# variable (after 3 runs, .env was 528 lines with MLFLOW_TRACKING_URI twice).
+touch "$HERMES_ENV"
+awk '/^# >>> hermes-audio-notebook managed block >>>$/{skip=1} !skip{print} /^# <<< hermes-audio-notebook managed block <<<$/{skip=0}' \
+    "$HERMES_ENV" > "$HERMES_ENV.stripped"
+cat "$HERMES_ENV.stripped" "$HERMES_ENV_TMP" > "$HERMES_ENV"
+rm -f "$HERMES_ENV.stripped" "$HERMES_ENV_TMP"
+
+# ===========================================================================
+# Custom Kokoro TTS tool
+# ===========================================================================
+# This is the workshop's "extend Hermes with your own tool" lesson. Without it
+# the agent cannot call kokoro_tts, and instead falls back to raw shell curl
+# against :8092. That still produces audio, so it looks like it worked, but the
+# custom-tool step never happened and the MLflow trace shows a pile of terminal
+# spans instead of one clean kokoro_tts tool span.
+echo "[INFO] Deploying custom Kokoro TTS tool..."
+HERMES_TOOLS_DIR="$HOME/.hermes/hermes-agent/tools"
+mkdir -p "$HERMES_TOOLS_DIR"
+if [ -f "$WORKSPACE_DIR/custom_tools/kokoro_tts_tool.py" ]; then
+    cp "$WORKSPACE_DIR/custom_tools/kokoro_tts_tool.py" "$HERMES_TOOLS_DIR/"
+    echo "[OK] Copied kokoro_tts_tool.py -> $HERMES_TOOLS_DIR"
+else
+    echo "[WARN] custom_tools/kokoro_tts_tool.py not found; the kokoro_tts tool will be unavailable." >&2
+fi
+
+# ===========================================================================
+# ROCm headers required by MIOpen's runtime kernel compilation
+# ===========================================================================
+# Kokoro's LSTM path makes MIOpen JIT-compile its dropout kernel, which
+# #includes <rocrand/rocrand_xorwow.h> and <hip/hip_runtime.h>. The AMD AI/ML
+# Ready Image ships neither header tree under /opt/rocm/include, so the compile
+# fails and the server dies with a bare, misleading:
+#     RuntimeError: miopenStatusUnknownError
+# (A plain torch LSTM on GPU works fine, which is why this looks like a Kokoro
+# bug rather than a missing-headers problem.)
+if [ ! -f /opt/rocm/include/rocrand/rocrand_xorwow.h ] || [ ! -f /opt/rocm/include/hip/hip_runtime.h ]; then
+    echo "[INFO] ROCm dev headers (rocrand/hip) missing; installing so MIOpen can compile its kernels..."
+    sudo apt-get install -y -qq rocrand-dev hip-dev >/dev/null 2>&1 || true
+fi
+
+# Fallback: the AMD AI/ML Ready Image has no ROCm apt repo configured, so the
+# apt install above is usually a no-op. The vLLM ROCm image we just built does
+# ship the full ROCm 7.2.3 header tree, so copy the headers out of it.
+if [ ! -f /opt/rocm/include/rocrand/rocrand_xorwow.h ] || [ ! -f /opt/rocm/include/hip/hip_runtime.h ]; then
+    echo "[INFO] Extracting ROCm headers from $IMAGE_NAME ..."
+    HDR_CID=$(sudo docker create "$IMAGE_NAME" 2>/dev/null)
+    if [ -n "$HDR_CID" ]; then
+        sudo mkdir -p /opt/rocm/include
+        for hdr in rocrand hip hsa half; do
+            if [ ! -e "/opt/rocm/include/$hdr" ]; then
+                sudo docker cp "$HDR_CID:/opt/rocm/include/$hdr" /opt/rocm/include/ >/dev/null 2>&1 \
+                    && echo "[INFO]   installed /opt/rocm/include/$hdr"
+            fi
+        done
+        sudo docker rm -f "$HDR_CID" >/dev/null 2>&1
+    fi
+fi
+
+if [ ! -f /opt/rocm/include/rocrand/rocrand_xorwow.h ] || [ ! -f /opt/rocm/include/hip/hip_runtime.h ]; then
+    echo "[WARN] rocrand/hip headers still absent under /opt/rocm/include." >&2
+    echo "       Kokoro will likely fail with 'miopenStatusUnknownError'." >&2
+    echo "       Install the ROCm dev packages for this image, or copy the header" >&2
+    echo "       trees (rocrand/, hip/, hsa/, half/) into /opt/rocm/include." >&2
+else
+    echo "[OK] ROCm rocrand/hip headers present."
+fi
 
 # ===========================================================================
 # Kokoro TTS server
@@ -418,7 +548,11 @@ fi
 DASHBOARD_APP="$WORKSPACE_DIR/hermes_profiler.py"
 if [ -f "$DASHBOARD_APP" ]; then
     echo "[INFO] Launching telemetry dashboard on port 8501..."
-    streamlit run "$DASHBOARD_APP" \
+    # Invoke via the Kokoro env's interpreter (that is where streamlit was
+    # installed, line ~513). A bare `streamlit` only resolves when a venv
+    # happens to be active, so unactivated runs failed with
+    # "streamlit: command not found".
+    "$KOKORO_ENV/bin/python" -m streamlit run "$DASHBOARD_APP" \
         --server.address 0.0.0.0 \
         --server.port 8501 \
         --server.headless true > streamlit_dashboard.log 2>&1 &
