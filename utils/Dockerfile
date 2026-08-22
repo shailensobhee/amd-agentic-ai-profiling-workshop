@@ -20,8 +20,9 @@
 #     -v $HOME/.cache/huggingface:/root/.cache/huggingface \
 #     amd-agentic-ai-profiling:mi300x
 #
-# The model weights (about 60 GB) are downloaded on first start. Mount the
-# Hugging Face cache as shown so the download is paid only once per host.
+# The model weights (about 60 GB) are BAKED INTO the image, so vLLM starts
+# serving immediately with no download. Mounting the Hugging Face cache is
+# optional and only matters if you switch to a model that is not baked in.
 # =============================================================================
 
 # The ROCm vLLM nightly already provides Python 3.12, PyTorch 2.12 with HIP 7.2,
@@ -44,6 +45,7 @@ LABEL org.opencontainers.image.vendor="AMD"
 LABEL org.opencontainers.image.source="https://github.com/shailensobhee/amd-agentic-ai-profiling-workshop"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PATH="/root/.local/bin:${PATH}" \
@@ -55,7 +57,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MLFLOW_PORT=5004 \
     DASHBOARD_PORT=8501 \
     JUPYTER_PORT=8888 \
-    HERMES_MODEL=meta-models/Muse-Glimmer-30B
+    HERMES_MODEL=meta-models/Muse-Glimmer-30B \
+    KOKORO_MODEL=hexgrad/Kokoro-82M
 
 # -----------------------------------------------------------------------------
 # 1. OS packages
@@ -158,7 +161,36 @@ RUN git clone https://github.com/briancaffey/hermes-otel.git \
         psutil requests cryptography
 
 # -----------------------------------------------------------------------------
-# 6. Workshop content
+# 6. Model weights (baked in)
+# -----------------------------------------------------------------------------
+# The workshop starts serving the moment the container does, so the ~60 GB of
+# weights ship INSIDE the image instead of being downloaded on first start.
+#
+# Ordering matters. Docker invalidates every layer AFTER the one that changed,
+# so this sits BEFORE the workshop content COPYs below: editing a notebook or a
+# script then rebuilds only the cheap trailing layers and leaves this one
+# cached. Putting it last would make every content edit re-download 60 GB.
+#
+# Both models come from the ENV block above, so names are defined in exactly one
+# place. BOTH matter: kokoro_server.py downloads its voice model at startup, so
+# baking only the LLM leaves the container still dependent on Hugging Face and
+# the TTS server dies offline. The script fails the BUILD if either is missing,
+# so a partial fetch can never be published as a "baked" image.
+COPY utils/bake-model.sh /tmp/bake-model.sh
+RUN chmod +x /tmp/bake-model.sh && /tmp/bake-model.sh && rm -f /tmp/bake-model.sh
+
+# Set AFTER the bake, never before: these make huggingface_hub resolve purely
+# from the local cache, which would stop the download above from ever running.
+#
+# They are required at runtime. vLLM calls list_repo_files() during startup
+# (vllm/transformers_utils/repo_utils.py), a live API call that ignores the
+# cache, so without these the server dies on a host with no egress even though
+# the weights are on disk.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
+# -----------------------------------------------------------------------------
+# 7. Workshop content
 # -----------------------------------------------------------------------------
 WORKDIR /workshop
 COPY tts.ipynb tts_executed.ipynb README.md ./
@@ -190,7 +222,7 @@ print('kokoro_tts registered OK')" \
                 /root/.config/miopen/miopen-lockfiles
 
 # -----------------------------------------------------------------------------
-# 7. Preconfigure Hermes and the profiling plugin
+# 8. Preconfigure Hermes and the profiling plugin
 # -----------------------------------------------------------------------------
 # Baked in so the container starts already pointing at the local vLLM server.
 RUN hermes config set model.provider custom \
@@ -243,7 +275,7 @@ RUN printf '%s\n' \
     >> /root/.hermes/.env
 
 # -----------------------------------------------------------------------------
-# 8. Entrypoint
+# 9. Entrypoint
 # -----------------------------------------------------------------------------
 COPY utils/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

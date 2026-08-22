@@ -84,6 +84,111 @@ else
     fail=1
 fi
 
+echo "[img-check] model weights are baked into the image"
+# The whole point of baking is that vLLM never downloads at start. If a future
+# edit reorders or drops the bake step, the image still builds and still boots,
+# it just quietly downloads 60 GB on a live workshop machine. Assert the shards
+# are on disk, resolved WITHOUT network access.
+if python3 - <<'PY'
+import json
+import os
+import sys
+
+try:
+    from huggingface_hub import snapshot_download
+except Exception as exc:
+    sys.exit(f"huggingface_hub unavailable: {exc}")
+
+model = os.environ.get("HERMES_MODEL")
+kokoro = os.environ.get("KOKORO_MODEL")
+if not model or not kokoro:
+    sys.exit("HERMES_MODEL or KOKORO_MODEL unset")
+
+# local_files_only proves the bytes are present rather than fetchable.
+path = snapshot_download(model, local_files_only=True)
+index = os.path.join(path, "model.safetensors.index.json")
+with open(index) as fh:
+    shards = sorted({v for v in json.load(fh)["weight_map"].values()})
+
+total = 0
+for s in shards:
+    f = os.path.join(path, s)
+    if not os.path.exists(f):
+        sys.exit(f"missing shard {s}")
+    total += os.path.getsize(f)
+
+if total < 40e9:
+    sys.exit(f"shards total only {total / 1e9:.2f} GB")
+
+# The TTS voice model is equally load-bearing: kokoro_server.py calls
+# hf_hub_download at startup and dies offline without it, which hangs the
+# entrypoint on the Kokoro health check.
+kpath = snapshot_download(kokoro, local_files_only=True)
+ktotal = sum(
+    os.path.getsize(os.path.join(dp, n))
+    for dp, _, ns in os.walk(kpath)
+    for n in ns
+)
+if ktotal < 100e6:
+    sys.exit(f"{kokoro} only {ktotal / 1e6:.1f} MB")
+
+print(f"LLM {len(shards)} shard(s) {total / 1e9:.2f} GB; TTS {ktotal / 1e9:.2f} GB")
+PY
+then
+    note "OK   weights present locally (no runtime download)"
+else
+    note "MISS model weights are NOT baked in; vLLM would download at start"
+    fail=1
+fi
+
+echo "[img-check] TTS stack initialises with no network"
+# The strongest guard, and the one that would have caught all three runtime
+# downloads at build time instead of on a live GPU host.
+#
+# Checking that files exist only proves a download ran. It does not prove the
+# startup path avoids the network. So monkeypatch socket to refuse every
+# outbound connection and then construct the REAL KPipeline that
+# kokoro_server.py builds. Anything that still reaches out fails the build here.
+#
+# Loopback stays allowed because torch and friends use it internally.
+if python3 - <<'PY'
+import os
+import socket
+import sys
+
+_real = socket.socket.connect
+
+
+def _blocked(self, address):
+    host = address[0] if isinstance(address, tuple) else address
+    if host in ("127.0.0.1", "::1", "localhost"):
+        return _real(self, address)
+    raise OSError(f"network blocked by img-check: {host}")
+
+
+socket.socket.connect = _blocked
+socket.getaddrinfo = lambda *a, **k: (_ for _ in ()).throw(
+    OSError("DNS blocked by img-check")
+)
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+
+try:
+    from kokoro import KPipeline
+
+    KPipeline(lang_code="a", device="cpu")
+except Exception as exc:
+    sys.exit(f"TTS stack needs the network at startup: {type(exc).__name__}: {exc}")
+
+print("KPipeline built with all outbound network refused")
+PY
+then
+    note "OK   TTS stack starts fully offline"
+else
+    note "MISS TTS stack still downloads at startup"
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "[img-check] FAILED"
     exit 1
