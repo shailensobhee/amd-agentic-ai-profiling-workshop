@@ -45,6 +45,7 @@ LABEL org.opencontainers.image.vendor="AMD"
 LABEL org.opencontainers.image.source="https://github.com/shailensobhee/amd-agentic-ai-profiling-workshop"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PATH="/root/.local/bin:${PATH}" \
@@ -177,6 +178,16 @@ RUN git clone https://github.com/briancaffey/hermes-otel.git \
 # so a partial fetch can never be published as a "baked" image.
 COPY utils/bake-model.sh /tmp/bake-model.sh
 RUN chmod +x /tmp/bake-model.sh && /tmp/bake-model.sh && rm -f /tmp/bake-model.sh
+
+# Set AFTER the bake, never before: these make huggingface_hub resolve purely
+# from the local cache, which would stop the download above from ever running.
+#
+# They are required at runtime. vLLM calls list_repo_files() during startup
+# (vllm/transformers_utils/repo_utils.py), a live API call that ignores the
+# cache, so without these the server dies on a host with no egress even though
+# the weights are on disk.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 # -----------------------------------------------------------------------------
 # 7. Workshop content
