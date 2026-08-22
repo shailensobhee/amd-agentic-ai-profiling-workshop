@@ -141,6 +141,54 @@ else
     fail=1
 fi
 
+echo "[img-check] TTS stack initialises with no network"
+# The strongest guard, and the one that would have caught all three runtime
+# downloads at build time instead of on a live GPU host.
+#
+# Checking that files exist only proves a download ran. It does not prove the
+# startup path avoids the network. So monkeypatch socket to refuse every
+# outbound connection and then construct the REAL KPipeline that
+# kokoro_server.py builds. Anything that still reaches out fails the build here.
+#
+# Loopback stays allowed because torch and friends use it internally.
+if python3 - <<'PY'
+import os
+import socket
+import sys
+
+_real = socket.socket.connect
+
+
+def _blocked(self, address):
+    host = address[0] if isinstance(address, tuple) else address
+    if host in ("127.0.0.1", "::1", "localhost"):
+        return _real(self, address)
+    raise OSError(f"network blocked by img-check: {host}")
+
+
+socket.socket.connect = _blocked
+socket.getaddrinfo = lambda *a, **k: (_ for _ in ()).throw(
+    OSError("DNS blocked by img-check")
+)
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+
+try:
+    from kokoro import KPipeline
+
+    KPipeline(lang_code="a", device="cpu")
+except Exception as exc:
+    sys.exit(f"TTS stack needs the network at startup: {type(exc).__name__}: {exc}")
+
+print("KPipeline built with all outbound network refused")
+PY
+then
+    note "OK   TTS stack starts fully offline"
+else
+    note "MISS TTS stack still downloads at startup"
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "[img-check] FAILED"
     exit 1

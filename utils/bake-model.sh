@@ -103,4 +103,29 @@ if ktotal < 100e6:
 print(f"  {kokoro}: {len(kfiles)} file(s), {ktotal / 1e9:.2f} GB")
 PY
 
+# ---- spaCy English model -------------------------------------------------
+# Third runtime dependency, and the least obvious. kokoro -> misaki -> spaCy:
+# misaki/en.py does `if not spacy.util.is_package(name): spacy.cli.download(name)`
+# for en_core_web_sm, which fetches from raw.githubusercontent.com. Installing
+# the package at build time makes is_package() true, so the download never runs.
+echo "Installing spaCy en_core_web_sm..."
+python3 -m spacy download en_core_web_sm >/dev/null 2>&1 \
+    || python3 -m pip install --no-cache-dir \
+       "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" \
+       >/dev/null
+
+# Verify via the SAME call misaki makes, so this proves the download is skipped
+# rather than merely that some files exist.
+python3 - <<'PY'
+import sys
+
+import spacy
+
+if not spacy.util.is_package("en_core_web_sm"):
+    sys.exit("BAKE FAILED: en_core_web_sm not installed; misaki would download it")
+
+nlp = spacy.load("en_core_web_sm", enable=["tok2vec", "tagger"])
+print(f"  spaCy en_core_web_sm ready ({len(nlp('a test sentence'))} tokens)")
+PY
+
 echo "Models baked successfully."
