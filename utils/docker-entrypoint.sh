@@ -36,7 +36,9 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-8501}"
 JUPYTER_PORT="${JUPYTER_PORT:-8888}"
 HERMES_MODEL="${HERMES_MODEL:-meta-models/Muse-Glimmer-30B}"
 HERMES_GPU="${HERMES_GPU:-0}"
-# vLLM must download about 60 GB on a cold cache, so the default wait is long.
+# Weights are baked into the image, so vLLM only has to load them from local
+# disk. The wait stays generous because loading ~60 GB onto the GPU and
+# compiling kernels still takes several minutes on a cold container.
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-3600}"
 JUPYTER_TOKEN="${JUPYTER_TOKEN:-}"
 # vLLM defaults to 0.92, which fails to start whenever anything else already
@@ -161,7 +163,7 @@ start_services() {
 
     # --- 1. vLLM -------------------------------------------------------------
     log "Starting vLLM (${HERMES_MODEL}) on port ${VLLM_HERMES_PORT}..."
-    log "  First start downloads about 60 GB of weights; this takes a while."
+    log "  Weights are baked into the image; loading them takes a few minutes."
     # No --max-model-len: use the model's native 131,072 token window, which is
     # what utils/helper.sh does on a bare host. Capping it lower is not just a
     # memory tweak: Hermes refuses to start against any model advertising less

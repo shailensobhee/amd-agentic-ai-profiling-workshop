@@ -112,9 +112,10 @@ docker run -d --name amd-agentic-ai-profiling \
 Watch it start with `docker logs -f amd-agentic-ai-profiling`. When it prints
 `All services are ready`, open `http://<host>:8888/lab/tree/tts.ipynb`.
 
-The first start downloads about 60 GB of model weights, so mount the Hugging
-Face cache as shown to pay that cost only once. Full details, flags and
-troubleshooting are in [utils/DOCKER.md](utils/DOCKER.md).
+The model weights are baked into the image, so vLLM starts serving without
+downloading anything. The image is correspondingly large (about 70 GB), so
+the `docker pull` is the slow step, and it is paid once per host. Full
+details, flags and troubleshooting are in [utils/DOCKER.md](utils/DOCKER.md).
 
 ### Manual setup
 

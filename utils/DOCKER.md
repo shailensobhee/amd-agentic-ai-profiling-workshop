@@ -38,7 +38,7 @@ Also baked in: the Hermes Agent (preconfigured to use the local vLLM), the
 - An AMD Instinct MI300X (or another ROCm-supported AMD Instinct GPU)
 - A working ROCm driver on the host, so `/dev/kfd` and `/dev/dri` exist
 - Docker
-- About 60 GB of free disk for the model weights, plus room for the image
+- About 90 GB of free disk: the image ships the model weights inside it
 
 ---
 
@@ -89,9 +89,10 @@ docker logs -f amd-agentic-ai-profiling
 When the log prints `All services are ready`, open
 `http://<host>:8888/lab/tree/tts.ipynb`.
 
-> **First start downloads about 60 GB of model weights.** Mounting the Hugging
-> Face cache as shown means the download is paid once per host, not once per
-> container. Later starts come up in minutes.
+> **The model weights ship inside the image.** vLLM loads them from local
+> disk, so no download happens at start and the container works with no
+> network access to Hugging Face. The trade is a large `docker pull`, paid
+> once per host.
 
 ### Why each flag is needed
 
@@ -180,7 +181,7 @@ smoke-checked. The following were confirmed end to end inside the container:
 | Symptom | Cause and fix |
 | :--- | :--- |
 | `/dev/kfd is missing` on start | The GPU flags were omitted. Use the full `docker run` above. |
-| Stuck at `Waiting for vLLM` | Normal on first start while weights download. Follow progress with `docker exec amd-agentic-ai-profiling tail -f /workshop/logs/vllm.log`. |
+| Stuck at `Waiting for vLLM` | Normal while ~60 GB of baked-in weights load onto the GPU and kernels compile. Follow progress with `docker exec amd-agentic-ai-profiling tail -f /workshop/logs/vllm.log`. |
 | A service exited and the container stopped | The entrypoint prints the tail of every log on failure. Inspect with `docker logs amd-agentic-ai-profiling`. |
 | Dashboard is empty | Run a notebook cell first, then click **Fetch** in the dashboard and select the newest run. |
 | Port already in use | Change the host side of the mapping, for example `-p 9999:8888`. |

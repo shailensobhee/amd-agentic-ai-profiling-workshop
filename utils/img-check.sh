@@ -84,6 +84,48 @@ else
     fail=1
 fi
 
+echo "[img-check] model weights are baked into the image"
+# The whole point of baking is that vLLM never downloads at start. If a future
+# edit reorders or drops the bake step, the image still builds and still boots,
+# it just quietly downloads 60 GB on a live workshop machine. Assert the shards
+# are on disk, resolved WITHOUT network access.
+if python3 - <<'PY'
+import json
+import os
+import sys
+
+try:
+    from huggingface_hub import snapshot_download
+except Exception as exc:
+    sys.exit(f"huggingface_hub unavailable: {exc}")
+
+model = os.environ.get("HERMES_MODEL")
+if not model:
+    sys.exit("HERMES_MODEL unset")
+
+# local_files_only proves the bytes are present rather than fetchable.
+path = snapshot_download(model, local_files_only=True)
+index = os.path.join(path, "model.safetensors.index.json")
+shards = sorted({v for v in json.load(open(index))["weight_map"].values()})
+
+total = 0
+for s in shards:
+    f = os.path.join(path, s)
+    if not os.path.exists(f):
+        sys.exit(f"missing shard {s}")
+    total += os.path.getsize(f)
+
+if total < 40e9:
+    sys.exit(f"shards total only {total / 1e9:.2f} GB")
+print(f"{len(shards)} shard(s), {total / 1e9:.2f} GB")
+PY
+then
+    note "OK   weights present locally (no runtime download)"
+else
+    note "MISS model weights are NOT baked in; vLLM would download at start"
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "[img-check] FAILED"
     exit 1
