@@ -100,13 +100,15 @@ except Exception as exc:
     sys.exit(f"huggingface_hub unavailable: {exc}")
 
 model = os.environ.get("HERMES_MODEL")
-if not model:
-    sys.exit("HERMES_MODEL unset")
+kokoro = os.environ.get("KOKORO_MODEL")
+if not model or not kokoro:
+    sys.exit("HERMES_MODEL or KOKORO_MODEL unset")
 
 # local_files_only proves the bytes are present rather than fetchable.
 path = snapshot_download(model, local_files_only=True)
 index = os.path.join(path, "model.safetensors.index.json")
-shards = sorted({v for v in json.load(open(index))["weight_map"].values()})
+with open(index) as fh:
+    shards = sorted({v for v in json.load(fh)["weight_map"].values()})
 
 total = 0
 for s in shards:
@@ -117,7 +119,20 @@ for s in shards:
 
 if total < 40e9:
     sys.exit(f"shards total only {total / 1e9:.2f} GB")
-print(f"{len(shards)} shard(s), {total / 1e9:.2f} GB")
+
+# The TTS voice model is equally load-bearing: kokoro_server.py calls
+# hf_hub_download at startup and dies offline without it, which hangs the
+# entrypoint on the Kokoro health check.
+kpath = snapshot_download(kokoro, local_files_only=True)
+ktotal = sum(
+    os.path.getsize(os.path.join(dp, n))
+    for dp, _, ns in os.walk(kpath)
+    for n in ns
+)
+if ktotal < 100e6:
+    sys.exit(f"{kokoro} only {ktotal / 1e6:.1f} MB")
+
+print(f"LLM {len(shards)} shard(s) {total / 1e9:.2f} GB; TTS {ktotal / 1e9:.2f} GB")
 PY
 then
     note "OK   weights present locally (no runtime download)"

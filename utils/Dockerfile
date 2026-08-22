@@ -56,7 +56,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MLFLOW_PORT=5004 \
     DASHBOARD_PORT=8501 \
     JUPYTER_PORT=8888 \
-    HERMES_MODEL=meta-models/Muse-Glimmer-30B
+    HERMES_MODEL=meta-models/Muse-Glimmer-30B \
+    KOKORO_MODEL=hexgrad/Kokoro-82M
 
 # -----------------------------------------------------------------------------
 # 1. OS packages
@@ -169,9 +170,11 @@ RUN git clone https://github.com/briancaffey/hermes-otel.git \
 # script then rebuilds only the cheap trailing layers and leaves this one
 # cached. Putting it last would make every content edit re-download 60 GB.
 #
-# HERMES_MODEL comes from the ENV block above, so the model name is defined in
-# exactly one place. The script fails the BUILD if any shard is missing, so a
-# partial fetch can never be published as a "baked" image.
+# Both models come from the ENV block above, so names are defined in exactly one
+# place. BOTH matter: kokoro_server.py downloads its voice model at startup, so
+# baking only the LLM leaves the container still dependent on Hugging Face and
+# the TTS server dies offline. The script fails the BUILD if either is missing,
+# so a partial fetch can never be published as a "baked" image.
 COPY utils/bake-model.sh /tmp/bake-model.sh
 RUN chmod +x /tmp/bake-model.sh && /tmp/bake-model.sh && rm -f /tmp/bake-model.sh
 
