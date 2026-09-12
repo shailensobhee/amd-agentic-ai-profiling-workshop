@@ -108,7 +108,12 @@ md(
 <b>An observability-driven optimization workshop</b><br>
 <sub>Hermes Agent &middot; MLflow telemetry &middot; AMD Instinct&trade; MI300X &middot; ROCm&trade;</sub>
 </p>
-
+"""
++ ("""
+**Author**: Shailen Sobhee, Jereshea John Mary, Sabira Shaik  
+**Knowledge level**: Intermediate
+""" if STANDALONE else "") +
+"""
 ---
 
 ## Welcome
