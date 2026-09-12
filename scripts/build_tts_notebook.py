@@ -311,6 +311,23 @@ workshop repo into your working directory, so the rest of the notebook runs
 exactly as it would inside the repo. All diagrams and screenshots are already
 embedded in the notebook itself.
 
+**What the cell below does, step by step:**
+
+* **Clones only what is needed.** It does a shallow, sparse checkout of the public
+  workshop repo (`--depth 1 --filter=blob:none --sparse`), so it pulls three small
+  folders instead of the whole repository with its large executed notebooks.
+* **Fetches three things:** `utils/hermes_profiler.py` (the telemetry dashboard
+  module) plus its Streamlit theme, `custom_tools/kokoro_tts_tool.py` (the custom
+  agent tool this notebook deploys into Hermes), and `assets/images/amd_logo.png`
+  (the dashboard logo).
+* **Puts them where the cells expect them.** It copies the files into your working
+  directory, removes the temporary checkout, and prints an `[OK]` line listing each
+  file so you can confirm setup succeeded.
+
+Nothing here downloads a model or a picture: every diagram and screenshot is baked
+into the notebook, so this cell fetches only the small pieces of runnable code the
+later cells import.
+
 Run it once at the start. It is safe to re-run: it refreshes the files in place.
 """
     )
