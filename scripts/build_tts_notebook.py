@@ -13,12 +13,25 @@ Run:  python scripts/build_tts_notebook.py
 import base64
 import json
 import os
+import sys
+
+# --standalone builds a single portable notebook (tts_standalone.ipynb): it adds
+# an early "Notebook preparation" cell that fetches the few support files the
+# cells need (utils/, custom_tools/, the dashboard logo) from the public repo,
+# and it bakes every remaining external image inline as base64 so the one .ipynb
+# ships on its own. Without the flag we build the repo-native tts.ipynb, whose
+# support files and assets/ already sit beside it in the checkout.
+STANDALONE = "--standalone" in sys.argv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
-NB_PATH = os.path.join(ROOT, "tts.ipynb")
+NB_PATH = os.path.join(ROOT, "tts_standalone.ipynb" if STANDALONE else "tts.ipynb")
 DIAGRAMS = os.path.join(ROOT, "assets", "diagrams")
 OUTPUTS = os.path.join(ROOT, "assets", "outputs")
+
+# Public repo the standalone fetch cell pulls its support files from.
+STANDALONE_REPO = "https://github.com/shailensobhee/amd-agentic-ai-profiling-workshop.git"
+STANDALONE_BRANCH = "main"
 
 # ---- cell builders ----------------------------------------------------------
 _cells = []
@@ -55,6 +68,11 @@ def img(name, alt, caption, width="88%", subdir="diagrams"):
             f'src="data:image/png;base64,{data}" width="{width}">\n</p>\n\n'
             f'<p align="center"><sub><i>{caption}</i></sub></p>')
     md(html)
+
+
+def _img_data_uri(relpath):
+    """Return a base64 data URI for an asset given a repo-relative path."""
+    return "data:image/png;base64," + _b64(os.path.join(ROOT, relpath))
 
 
 # Overview cells shown after each profiling run. The Step 2 cell exposes the
@@ -268,6 +286,58 @@ for _p in ("/usr/local/bin", os.path.expanduser("~/.local/bin")):
 """
 )
 
+# ---- 4b. Standalone: fetch the support files this notebook needs ------------
+# In the repo checkout these live beside the notebook (utils/, custom_tools/,
+# assets/). The standalone notebook ships alone, so it pulls just those few
+# files from the public repo into the working directory, mirroring the pattern
+# used by the Google ADK tutorial in this collection. Idempotent: re-running
+# refreshes the checkout without failing if it already exists.
+if STANDALONE:
+    md(
+"""---
+
+## Notebook preparation
+
+This is a **standalone** notebook: everything it needs travels with it, except a
+few small support files that back specific cells (the telemetry dashboard module
+`utils/hermes_profiler.py` and its Streamlit theme, the custom `kokoro_tts` tool,
+and the dashboard logo). The cell below fetches just those files from the public
+workshop repo into your working directory, so the rest of the notebook runs
+exactly as it would inside the repo. All diagrams and screenshots are already
+embedded in the notebook itself.
+
+Run it once at the start. It is safe to re-run: it refreshes the files in place.
+"""
+    )
+    code(
+'''%%bash
+set -euo pipefail
+
+REPO_URL="{repo}"
+BRANCH="{branch}"
+CLONE_DIR=".nb_support_checkout"
+
+# Fetch only what the later cells import or deploy, not the whole repo. A shallow,
+# sparse checkout keeps this fast and avoids pulling the large executed notebooks.
+rm -rf "$CLONE_DIR"
+git clone --quiet --depth 1 --branch "$BRANCH" --filter=blob:none --sparse "$REPO_URL" "$CLONE_DIR"
+( cd "$CLONE_DIR" && git sparse-checkout set utils custom_tools assets/images >/dev/null )
+
+# Place the files where the notebook cells expect them (working directory root).
+mkdir -p utils custom_tools assets/images
+cp -r "$CLONE_DIR/utils/." utils/
+cp -r "$CLONE_DIR/custom_tools/." custom_tools/
+cp -r "$CLONE_DIR/assets/images/." assets/images/
+rm -rf "$CLONE_DIR"
+
+echo "[OK] Support files ready:"
+echo "     utils/hermes_profiler.py        (telemetry dashboard module)"
+echo "     utils/.streamlit/config.toml    (dashboard theme)"
+echo "     custom_tools/kokoro_tts_tool.py (custom agent tool)"
+echo "     assets/images/amd_logo.png      (dashboard logo)"
+'''.format(repo=STANDALONE_REPO, branch=STANDALONE_BRANCH)
+    )
+
 # ---- 5. Prepare input text --------------------------------------------------
 md(
 """---
@@ -403,11 +473,13 @@ Once the run loads, explore what the dashboard shows for this execution:
 
 md('''<div align="center">
 
-![The AMD Agent Telemetry dashboard Overview tab for a Hermes session. A span waterfall shows the agent, LLM and API spans plus the text_to_speech tool span highlighted in orange as the longest at 24.44 seconds, and a CPU/GPU utilization time series below tracks hardware use across the run.](./assets/images/dashboard/dashboard_overview.png)
+![The AMD Agent Telemetry dashboard Overview tab for a Hermes session. A span waterfall shows the agent, LLM and API spans plus the text_to_speech tool span highlighted in orange as the longest at 24.44 seconds, and a CPU/GPU utilization time series below tracks hardware use across the run.](%s)
 
 <sub>*The Overview tab of the telemetry dashboard. The orange text_to_speech span is the longest single step, and the utilization chart shows the GPU is mostly idle while it runs. That gap is exactly the bottleneck we will fix.*</sub>
 
-</div>''')
+</div>''' % (
+    _img_data_uri("assets/images/dashboard/dashboard_overview.png") if STANDALONE
+    else "./assets/images/dashboard/dashboard_overview.png"))
 
 md(
 """<details>
