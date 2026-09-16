@@ -13,12 +13,25 @@ Run:  python scripts/build_tts_notebook.py
 import base64
 import json
 import os
+import sys
+
+# --standalone builds a single portable notebook (tts_standalone.ipynb): it adds
+# an early "Notebook preparation" cell that fetches the few support files the
+# cells need (utils/, custom_tools/, the dashboard logo) from the public repo,
+# and it bakes every remaining external image inline as base64 so the one .ipynb
+# ships on its own. Without the flag we build the repo-native tts.ipynb, whose
+# support files and assets/ already sit beside it in the checkout.
+STANDALONE = "--standalone" in sys.argv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
-NB_PATH = os.path.join(ROOT, "tts.ipynb")
+NB_PATH = os.path.join(ROOT, "tts_standalone.ipynb" if STANDALONE else "tts.ipynb")
 DIAGRAMS = os.path.join(ROOT, "assets", "diagrams")
 OUTPUTS = os.path.join(ROOT, "assets", "outputs")
+
+# Public repo the standalone fetch cell pulls its support files from.
+STANDALONE_REPO = "https://github.com/shailensobhee/amd-agentic-ai-profiling-workshop.git"
+STANDALONE_BRANCH = "main"
 
 # ---- cell builders ----------------------------------------------------------
 _cells = []
@@ -57,18 +70,27 @@ def img(name, alt, caption, width="88%", subdir="diagrams"):
     md(html)
 
 
+def _img_data_uri(relpath):
+    """Return a base64 data URI for an asset given a repo-relative path."""
+    return "data:image/png;base64," + _b64(os.path.join(ROOT, relpath))
+
+
 # Overview cells shown after each profiling run. The Step 2 cell exposes the
 # link-base dropdown and sets HERMES_PROXY_BASE; the kokoro cells reuse it.
-_OVERVIEW = '''# This cell shows an overview tab alone; for a detailed view, click on the links provided when running this cell.
-import importlib, sys, os, logging
+_OVERVIEW = '''import importlib, sys, os, logging, warnings
+
 sys.path.insert(0, os.path.abspath("utils"))
-logging.disable(logging.WARNING)          # mute Streamlit's import-time warnings
+
+logging.disable(logging.WARNING)   # mute Streamlit's "missing ScriptRunContext" etc.
+warnings.filterwarnings("ignore")  # mute plotly/mlflow UserWarning/FutureWarning etc.
+
 import hermes_profiler
 importlib.reload(hermes_profiler)          # pick up edits without a kernel restart
-logging.disable(logging.NOTSET)
 
 SESSION_ID = None   # a run ID, or None to auto-fetch the latest session
-hermes_profiler.show_session_overview(SESSION_ID)'''
+hermes_profiler.show_session_overview(SESSION_ID)
+
+logging.disable(logging.NOTSET)'''
 
 
 
@@ -88,9 +110,14 @@ md(
 
 <p align="center">
 <b>An observability-driven optimization workshop</b><br>
-<sub>Hermes Agent &middot; MLflow telemetry &middot; AMD Instinct&trade; MI300X &middot; ROCm&trade;</sub>
+<sub>Hermes Agent &middot; MLflow &amp; Grafana otel-lgtm telemetry &middot; AMD Instinct&trade; MI300X &middot; ROCm&trade;</sub>
 </p>
-
+"""
++ ("""
+**Author**: Shailen Sobhee, Jereshea John Mary, Sabira Shaik  
+**Knowledge level**: Intermediate
+""" if STANDALONE else "") +
+"""
 ---
 
 ## Welcome
@@ -162,7 +189,7 @@ This tutorial was developed and tested with the setup below.
 ### Hardware
 **AMD Instinct&trade; MI300X GPU (192 GB VRAM).** This tutorial was tested on a
 single MI300X, which comfortably hosts both the Muse-Glimmer-30B model and the
-Kokoro TTS model at once. Use an AMD Instinct GPU with ROCm support that meets the
+Kokoro TTS model at once. Use an AMD Instinct&trade; GPU with ROCm support that meets the
 official requirements.
 
 ### Software
@@ -268,6 +295,75 @@ for _p in ("/usr/local/bin", os.path.expanduser("~/.local/bin")):
 """
 )
 
+# ---- 4b. Standalone: fetch the support files this notebook needs ------------
+# In the repo checkout these live beside the notebook (utils/, custom_tools/,
+# assets/). The standalone notebook ships alone, so it pulls just those few
+# files from the public repo into the working directory, mirroring the pattern
+# used by the Google ADK tutorial in this collection. Idempotent: re-running
+# refreshes the checkout without failing if it already exists.
+if STANDALONE:
+    md(
+"""---
+
+## Notebook preparation
+
+This is a **standalone** notebook: everything it needs travels with it, except a
+few small support files that back specific cells (the telemetry dashboard module
+`utils/hermes_profiler.py` and its Streamlit theme, the custom `kokoro_tts` tool,
+and the dashboard logo). The cell below fetches just those files from the public
+workshop repo into your working directory, so the rest of the notebook runs
+exactly as it would inside the repo. All diagrams and screenshots are already
+embedded in the notebook itself.
+
+**What the cell below does, step by step:**
+
+* **Clones only what is needed.** It does a shallow, sparse checkout of the public
+  workshop repo (`--depth 1 --filter=blob:none --sparse`), so it pulls three small
+  folders instead of the whole repository with its large executed notebooks.
+* **Fetches three things:** `utils/hermes_profiler.py` (the telemetry dashboard
+  module) plus its Streamlit theme, `custom_tools/kokoro_tts_tool.py` (the custom
+  agent tool this notebook deploys into Hermes), and `assets/images/amd_logo.png`
+  (the dashboard logo).
+* **Puts them where the cells expect them.** It copies the files into your working
+  directory, removes the temporary checkout, and prints an `[OK]` line listing each
+  file so you can confirm setup succeeded.
+
+Nothing here downloads a model or a picture: every diagram and screenshot is baked
+into the notebook, so this cell fetches only the small pieces of runnable code the
+later cells import.
+
+Run it once at the start. It is safe to re-run: it refreshes the files in place.
+"""
+    )
+    code(
+'''%%bash
+set -euo pipefail
+
+REPO_URL="{repo}"
+BRANCH="{branch}"
+CLONE_DIR=".nb_support_checkout"
+
+# Fetch only what the later cells import or deploy, not the whole repo. A shallow,
+# sparse checkout keeps this fast and avoids pulling the large executed notebooks.
+rm -rf "$CLONE_DIR"
+git clone --quiet --depth 1 --branch "$BRANCH" --filter=blob:none --sparse "$REPO_URL" "$CLONE_DIR"
+( cd "$CLONE_DIR" && git sparse-checkout set utils custom_tools assets/images >/dev/null )
+
+# Place the files where the notebook cells expect them (working directory root).
+mkdir -p utils custom_tools assets/images
+cp -r "$CLONE_DIR/utils/." utils/
+cp -r "$CLONE_DIR/custom_tools/." custom_tools/
+cp -r "$CLONE_DIR/assets/images/." assets/images/
+rm -rf "$CLONE_DIR"
+
+echo "[OK] Support files ready:"
+echo "     utils/hermes_profiler.py        (telemetry dashboard module)"
+echo "     utils/.streamlit/config.toml    (dashboard theme)"
+echo "     custom_tools/kokoro_tts_tool.py (custom agent tool)"
+echo "     assets/images/amd_logo.png      (dashboard logo)"
+'''.format(repo=STANDALONE_REPO, branch=STANDALONE_BRANCH)
+    )
+
 # ---- 5. Prepare input text --------------------------------------------------
 md(
 """---
@@ -318,8 +414,10 @@ md(
 **Watch the Hermes output cell** and you will notice logs similar to this:
 
 ```text
-[hermes-otel] mlflow at http://127.0.0.1:5004/v1/traces (traces only)
-[hermes-otel] Live dashboard store active
+[hermes-otel] ✓ mlflow at http://127.0.0.1:5004/v1/traces (traces only)
+[hermes-otel] ✓ lgtm at http://127.0.0.1:4318/v1/traces (query only)
+[hermes-otel] ✓ Live dashboard store active
+[hermes-otel] ✓ Host metrics sampler on (every 100 ms, gpu=amd)
 [hermes-otel] Registered 13 hooks
 ```
 
@@ -350,17 +448,17 @@ server address and gives you a direct link.
 > `ssh -L 8501:localhost:8501`). Use the **server-IP** link when you are hitting a
 > remote machine directly and port `8501` is reachable from your network.
 
-**The dashboard has four tabs:**
+**The dashboard has five tabs:**
 
-1. **Overview.** Plots the span waterfall for the agent's flow alongside CPU and
+1. **Overview:** Plots the span waterfall for the agent's flow alongside CPU and
    GPU utilization at each span. A toggle switches between the standalone CPU/GPU
    timeline (the default) and the full-session waterfall correlated with it. A
    tool-breakdown table sits below the chart.
-2. **CPU / GPU separate.** Shows the CPU and GPU graphs individually, with an
+2. **CPU / GPU separate:** Shows the CPU and GPU graphs individually, with an
    option to view the raw `.csv` files the Overview charts are plotted from.
-3. **Context & tools.** Charts how the agent's context grows step by step across the session, plus a per-turn breakdown and every tool    outcome, including failures.
-4. **Traces.** Provides a direct MLflow link for each turn in the session.
-5. **Analysis.** Feeds the MLflow traces plus each tool's execution time to the
+3. **Context & tools:** Charts how the agent's context grows step by step across the session, plus a per-turn breakdown and every tool    outcome, including failures.
+4. **Traces:** Provides a direct MLflow link for each turn in the session.
+5. **Analysis:** Feeds the MLflow traces plus each tool's execution time to the
    local `hermes` CLI and reports how the agent could be improved. Depending on
    the length of the traces this can take around five minutes.
 ''')
@@ -403,11 +501,13 @@ Once the run loads, explore what the dashboard shows for this execution:
 
 md('''<div align="center">
 
-![The AMD Agent Telemetry dashboard Overview tab for a Hermes session. A span waterfall shows the agent, LLM and API spans plus the text_to_speech tool span highlighted in orange as the longest at 24.44 seconds, and a CPU/GPU utilization time series below tracks hardware use across the run.](./assets/images/dashboard/dashboard_overview.png)
+![The AMD Agent Telemetry dashboard Overview tab for a Hermes session. A span waterfall shows the agent, LLM and API spans plus the text_to_speech tool span highlighted in orange as the longest at 24.44 seconds, and a CPU/GPU utilization time series below tracks hardware use across the run.](%s)
 
 <sub>*The Overview tab of the telemetry dashboard. The orange text_to_speech span is the longest single step, and the utilization chart shows the GPU is mostly idle while it runs. That gap is exactly the bottleneck we will fix.*</sub>
 
-</div>''')
+</div>''' % (
+    _img_data_uri("assets/images/dashboard/dashboard_overview.png") if STANDALONE
+    else "./assets/images/dashboard/dashboard_overview.png"))
 
 md(
 """<details>
@@ -701,9 +801,9 @@ from matplotlib import font_manager
 # --- Tool execution time (seconds) for each approach ---
 # Default values; replace them with the execution seconds from your own runs,
 # taken from each tool's output line and the profiling dashboard.
-edge_time = 11.09      # Edge TTS (cloud) - note: truncates long text (~5 min cap)
-seq_time = 67.2      # Kokoro, sequential mode (local, unoptimized)
-batched_time = 5.02    # Kokoro, batched mode (local, optimized)
+edge_time = 12.32      # Edge TTS (cloud) - note: truncates long text (~5 min cap)
+seq_time = 120.6      # Kokoro, sequential mode (local, unoptimized)
+batched_time = 9.62    # Kokoro, batched mode (local, optimized)
 
 for _f in ("Arial", "Liberation Sans", "DejaVu Sans"):
     if any(_f in f.name for f in font_manager.fontManager.ttflist):
