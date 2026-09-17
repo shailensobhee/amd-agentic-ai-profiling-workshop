@@ -569,8 +569,8 @@ we want to profile.
 
 ### Kokoro ships as a Python package, not as a service
 
-Upstream, Kokoro is distributed as a pip package. You install it, import it, and call
-it inside your own process:
+Kokoro is distributed as a pip package. You install it, import it, and call it
+inside your own process:
 
 ```python
 from kokoro import KPipeline
@@ -578,15 +578,15 @@ pipeline = KPipeline(lang_code="a")      # loads the model
 audio = pipeline(text)                   # synthesizes
 ```
 
-That is a **library**, and it is the right shape for a script that synthesizes once
-and exits. It is the wrong shape for what we are doing here, for two reasons:
+That is a **library**. It works well for a one-off script that synthesizes some text
+and exits, but not for what we are doing here:
 
 - **The model would reload every time.** `KPipeline(...)` pulls Kokoro-82M into GPU
   memory. In a library, that cost is paid on every process start. Our agent calls TTS
   repeatedly, so we would pay it repeatedly and that load time would pollute
   every measurement we take.
 
-### So we wrapped it in a server
+### Wrapped in a server
 
 `utils/kokoro_server.py` is a lightweight **FastAPI + Uvicorn** wrapper we wrote
 around the package. It converts the library into a long-running service.
@@ -706,9 +706,9 @@ code(_OVERVIEW)
 md(
 """### How `kokoro_tts` works, and why the first run is slow
 
-`kokoro_tts` runs the Kokoro TTS model locally on the AMD MI300X GPU. In its default
-mode it processes the input **one sentence at a time** and saves the result as a WAV
-file.
+`kokoro_tts` runs the Kokoro TTS model locally on the AMD MI300X GPU. Natively,
+Kokoro synthesizes **one sentence per GPU forward pass**: that is the `sequential`
+mode, and it is what the tool uses by default. The result is saved as a WAV file.
 
 Load this run in the dashboard the same way as before: click **Fetch**, select
 the run at the top of the list, then click **Load / Reload**. You should see:
@@ -768,9 +768,8 @@ side by side with the sequential run.
 
 ### What changed under the hood
 
-`mode='batched'` uses our optimized implementation. Kokoro does not support native
-batching, so we modified the inference pipeline to process multiple sentences in a
-single GPU forward pass instead of one at a time:
+Kokoro has no native batching to switch on, so `mode='batched'` is a reimplementation
+of the model's forward pass. Three ideas do the work:
 
 - **Batching.** Multiple sentences are grouped so the GPU processes more work per
   forward pass, improving hardware utilization.
@@ -779,26 +778,13 @@ single GPU forward pass instead of one at a time:
 - **Correct batched processing.** Padding and attention masks keep each sentence
   independent, and the final audio is trimmed back to its true length.
 
-### The functions that implement `batched` mode
-
-All of these live in `utils/kokoro_server.py`. They are worth reading in this order,
-because each one exists to solve a problem the previous one exposes:
+Three functions in `utils/kokoro_server.py` implement them:
 
 | Function | Responsibility |
 |---|---|
-| `KokoroEngine.synthesize()` | Entry point for both modes. Times phonemization and inference separately, then dispatches to one of the two runners below. |
-| `KokoroEngine._run_sequential()` | The **baseline**. Loops over sentences calling native `KPipeline.infer()`, one GPU forward pass each. |
-| `KokoroEngine._run_batched()` | The **optimized runner**. Sorts sentences by token length (bucketing), chunks them into batches of `batch_size`, pads each batch into one tensor, and trims each sentence's audio back out afterwards. |
-| `KokoroEngine.build_items()` | Shared by both modes. Splits text into sentences, phonemizes via `KPipeline.g2p`, and maps phonemes to token IDs. |
-| `batched_forward()` | The **replacement forward pass**. Stands in for `KModel.forward_with_tokens`, which only works at batch size 1. Builds a real padding mask from true sequence lengths, packs the duration LSTM, zeroes padded durations, and constructs a per-sentence alignment matrix. |
+| `KokoroEngine._run_batched()` | The **optimized runner**, used in place of the sequential loop. Sorts sentences by token length (bucketing), chunks them into batches of `batch_size`, pads each batch into one tensor, and trims each sentence's audio back out afterwards. |
+| `batched_forward()` | The **replacement forward pass**, standing in for `KModel.forward_with_tokens`. Builds a real padding mask from true sequence lengths, packs the duration LSTM, zeroes padded durations, and constructs a per-sentence alignment matrix. |
 | `_batched_f0n_train()` | Batch-safe replacement for the model's `F0Ntrain`. Packs the shared LSTM by frame count so padding in one sentence cannot leak into the next. |
-
-> **Why a replacement forward pass is needed at all.** Native
-> `KModel.forward_with_tokens` assumes every sequence fills the tensor
-> (`input_lengths = torch.full(...)`) and builds a single alignment matrix that it
-> broadcasts across the batch. At batch size greater than one that does not run
-> slowly, it produces wrong audio. Batching Kokoro therefore is not a flag, it is a
-> reimplementation, which is what `batched_forward()` and `_batched_f0n_train()` are.
 
 ### What you should see in the dashboard
 

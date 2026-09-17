@@ -922,7 +922,6 @@ fi
 echo -e "\n========================================================================="
 echo "[OK] Setup complete."
 echo "  vLLM endpoint (API):  $(service_url "$VLLM_HERMES_PORT")v1"
-echo "  Local TTS (API):      $(service_url "$TTS_PORT")  [started from the notebook]"
 echo "  MLflow tracking:      $(service_url 5004)"
 echo "  Grafana (CPU/GPU):    $(service_url 3000)"
 echo "  Telemetry dashboard:  $(service_url 8501)"

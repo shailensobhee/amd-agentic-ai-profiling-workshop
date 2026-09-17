@@ -50,12 +50,16 @@ KOKORO_PORT=$KOKORO_PORT nohup "$APP_ENV/bin/python" "$KOKORO_SERVER" \
 KOKORO_PID=$!
 echo "[INFO] Started (PID $KOKORO_PID, logs: $KOKORO_LOG)."
 
-echo "[INFO] Waiting for /health (model load + warmup of both modes)..."
+echo "[INFO] Waiting for /health"
 for i in $(seq 1 120); do
     code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$KOKORO_PORT/health")
     if [ "${code:-000}" = "200" ]; then
-        echo "[OK] Kokoro TTS server is active."
-        curl -s "http://localhost:$KOKORO_PORT/health"; 
+        # Report the device instead of the raw /health JSON. Worth one line:
+        # the engine falls back to CPU when ROCm is not visible, and a CPU run
+        # still works, just far slower, which would quietly ruin the profiling.
+        device=$(curl -s "http://localhost:$KOKORO_PORT/health" |
+            "$APP_ENV/bin/python" -c 'import json,sys; h=json.load(sys.stdin); print(h["device"], "-", h["gpu"])' 2>/dev/null)
+        echo "[OK] Kokoro TTS server is active on ${device:-unknown device}."
         exit 0
     fi
     # Fail fast if the process already died rather than waiting out the loop.
