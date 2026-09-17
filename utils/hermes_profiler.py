@@ -498,28 +498,6 @@ def fetch_session_ids(tracking_uri: str):
     return [sid for sid, _ in sorted(latest.items(), key=lambda kv: kv[1], reverse=True)]
 
 
-@st.cache_data(show_spinner=False)
-def download_profiling(tracking_uri: str, run_id: str, session_id: str):
-    """Download the run's profiling/ artifacts into this session's own folder,
-    PROFILING_CACHE_DIR/<session_id>, and return the path to the CSVs. Keeping a
-    stable per-session folder (instead of a random temp dir) means the CSVs sit in
-    the SAME place as traces.json, so all of a session's telemetry is in one spot.
-
-    Downloading here overwrites the CSVs with the latest, so a resumed session's
-    Load reflects the grown timelines; traces.json is untouched (it is written
-    separately by the Load handler and is not an MLflow artifact).
-
-    Raises whatever mlflow.artifacts.download_artifacts raises (e.g. on a missing
-    artifact or an unreachable server); the caller catches it and shows st.error.
-    """
-    mlflow.set_tracking_uri(tracking_uri)
-    session_dir = os.path.join(PROFILING_CACHE_DIR, session_id)
-    os.makedirs(session_dir, exist_ok=True)
-    return mlflow.artifacts.download_artifacts(
-        run_id=run_id, artifact_path=ARTIFACT_DIR, dst_path=session_dir
-    )
-
-
 # ---------------------------------------------------------------------------
 # CPU / GPU from Prometheus (per-turn, merged into session-level CSVs)
 # ---------------------------------------------------------------------------
@@ -1241,8 +1219,8 @@ def start_hermes_analysis(local_dir: str, session_id: str, full_traces=None):
     The data is always written to disk and referenced by path (never inlined), so
     the prompt stays tiny regardless of how many traces there are and can never
     hit the OS command-line arg limit. tool_execution.csv already sits in
-    local_dir (under PROFILING_CACHE_DIR, see download_profiling), so it is
-    referenced in place; the traces are reused from the shared per-session cache
+    local_dir (under PROFILING_CACHE_DIR, written by save_session_cpu_gpu), so
+    it is referenced in place; the traces are reused from the shared per-session cache
     file (traces_cache_path) that Load already wrote, so both the dashboard and
     this analysis read the same traces.json. Everything lives under
     PROFILING_CACHE_DIR so it is purged together on cleanup.
@@ -2767,7 +2745,7 @@ if _running_under_streamlit():
         # Fetch everything fresh: drop the @st.cache_data caches BEFORE fetching so a
         # resumed session's newly-added turns are pulled (and rewritten to the cache
         # file) on the first Load click, not the second.
-        for _cache in (resolve_run, download_profiling, fetch_session_traces, fetch_full_traces):
+        for _cache in (resolve_run, fetch_session_traces, fetch_full_traces):
             try:
                 _cache.clear()
             except Exception:
