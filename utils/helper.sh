@@ -44,9 +44,13 @@ export HF_HOME="$HOME/.cache/huggingface"
 sudo chown -R $USER:$USER "$HOME/.cache/huggingface"
 HERMES_GPU="0"   # Muse-Glimmer-30B runs on GPU 0
 
-# vLLM image: the official ROCm release image, which includes Muse-Glimmer
-# support in v0.28.0.
-IMAGE_NAME="vllm/vllm-openai-rocm:v0.28.0"
+# vLLM image: AMD's official ROCm release image. Muse-Glimmer-30B support is
+# native since v0.28.1, so we track the latest release tag (v0.29.0). Note that
+# this prebuilt image ships ROCm 7.2.3; the newest ROCm 7.14.1 line is not yet
+# carried by an official vllm-openai-rocm release, so the containerized Docker
+# workshop (utils/Dockerfile) builds vLLM 0.29.0 from source on a ROCm 7.14.1
+# base to get both latest, while this bare-host path uses the prebuilt image.
+IMAGE_NAME="vllm/vllm-openai-rocm:v0.29.0"
 VLLM_HERMES_PORT=8001
 
 SYSTEM_IP=$(ip route get 1 2>/dev/null | awk '{print $7; exit}' || ip route get 8.8.8.8 | awk '{print $7; exit}')

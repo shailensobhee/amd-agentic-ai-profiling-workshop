@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/GPU-AMD%20Instinct%E2%84%A2%20MI300X-ED1C24" alt="AMD Instinct MI300X">
-  <img src="https://img.shields.io/badge/ROCm-7.2-ED1C24" alt="ROCm 7.2">
+  <img src="https://img.shields.io/badge/ROCm-7.14.1-ED1C24" alt="ROCm 7.14.1">
   <img src="https://img.shields.io/badge/OS-Ubuntu%2024.04-E95420" alt="Ubuntu 24.04">
   <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
   <img src="https://img.shields.io/badge/Agent-Hermes-5B6270" alt="Hermes Agent">
@@ -77,7 +77,7 @@ The default TTS uses Edge TTS, which has some limitations. We therefore use a lo
 | :--- | :--- |
 | **Operating system** | Ubuntu 24.04 |
 | **GPU** | AMD Instinct&trade; MI300X (192 GB VRAM) with ROCm support |
-| **ROCm** | 7.2 (use `rocm-smi` instead of `amd-smi` on 6.4 and earlier) |
+| **ROCm** | 7.14.1 (use `rocm-smi` instead of `amd-smi` on 6.4 and earlier) |
 | **Python** | 3.12 with `venv` and `pip` |
 
 Verify your GPUs are visible before you start:
@@ -86,7 +86,7 @@ Verify your GPUs are visible before you start:
 amd-smi
 ```
 
-> **Model note.** The agent is powered by **Muse-Glimmer-30B**, served with vLLM on the MI300X using AMD's prebuilt `vllm/vllm-openai-rocm:v0.28.0` release image, which includes Muse-Glimmer-30B support.
+> **Model note.** The agent is powered by **Muse-Glimmer-30B**, served with vLLM on the MI300X. The image builds **vLLM 0.29.0 from source** on a **ROCm 7.14.1** base (`rocm/dev-ubuntu-24.04:7.14.1-full`, Python 3.12). Muse-Glimmer-30B support is native in vLLM since v0.28.1 (upstream PR #51655), so no source patch is required for the model itself. The from-source build is what lets the workshop run on the latest ROCm 7.14.1 line; AMD's prebuilt `vllm/vllm-openai-rocm` release images still ship on ROCm 7.2.3.
 
 ---
 

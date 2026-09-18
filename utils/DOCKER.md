@@ -5,6 +5,14 @@ a manual backend setup. It targets **AMD Instinct MI300X** with ROCm.
 
 Image: `shailensobhee1/amd-agentic-ai-profiling:mi300x`
 
+Software stack: **ROCm 7.14.1** (base `rocm/dev-ubuntu-24.04:7.14.1-full`, Python
+3.12) with **vLLM 0.29.0 built from source** against the ROCm 7.14 PyTorch
+wheels. Building vLLM from source is deliberate: the newest ROCm line (7.14.1)
+is not yet carried by AMD's prebuilt `vllm/vllm-openai-rocm` release images,
+which still ship on ROCm 7.2.3. Muse-Glimmer-30B needs no source patch (native
+in vLLM since v0.28.1). Expect the vLLM compile to add roughly 30-60 min to a
+cold image build; it is cached across rebuilds.
+
 ---
 
 ## What is inside

@@ -194,7 +194,7 @@ official requirements.
 
 ### Software
 
-**ROCm&trade; 7.2.** Install and verify ROCm using the ROCm install guide, then
+**ROCm&trade; 7.14.1.** Install and verify ROCm using the ROCm install guide, then
 confirm your GPUs are visible:
 
 ```bash
@@ -203,10 +203,11 @@ amd-smi
 
 > **Note.** For ROCm 6.4 and earlier, use `rocm-smi` instead.
 
-**vLLM ROCm image.** The agent's model is served with vLLM, using AMD's prebuilt
-`vllm/vllm-openai-rocm:v0.28.0` release image, which includes Muse-Glimmer-30B
-support. AMD also provides other prebuilt ROCm images (PyTorch, Ubuntu 22.04 /
-24.04) you can reuse for ROCm work.
+**vLLM 0.29.0 on ROCm 7.14.1.** The agent's model is served with vLLM 0.29.0 on
+ROCm 7.14.1 (PyTorch 2.14 built for ROCm 7.14). Muse-Glimmer-30B support is
+native in vLLM since v0.28.1, so no source patch is needed for the model. AMD
+also provides other prebuilt ROCm images (PyTorch, Ubuntu 22.04 / 24.04) you can
+reuse for ROCm work.
 
 **Python 3.12** (with `venv` and `pip`) runs the Kokoro server, MLflow, and this
 notebook.
@@ -240,7 +241,7 @@ md(
 | Service | Role |
 | :--- | :--- |
 | **Hermes backend** (vLLM &middot; Muse-Glimmer-30B) | The agent's "brain": the model that plans and picks tools. |
-| **Hermes OTel** | The plugin that instruments the agent. `utils/helper.sh` writes its config file with two OpenTelemetry backends: it sends execution **traces** (spans, timings, tokens) to the MLflow tracking server, and hardware **metrics** to Grafana `otel-lgtm`. `utils/helper.sh` sets it to sample `psutil` (CPU) and `amdsmi` (GPU) every 100 ms (much finer than the plugin's default), so the timelines have the resolution to see per-tool activity. |
+| **Hermes OTel** | The plugin that instruments the agent. `utils/helper.sh` writes its config file with two OpenTelemetry backends: it sends execution **traces** (spans, timings, tokens) to the MLflow tracking server, and hardware **metrics** to Grafana `otel-lgtm`. `utils/helper.sh` sets it to sample `psutil` (CPU) and the AMD GPU (via `rocm-smi`) every 100 ms (much finer than the plugin's default), so the timelines have the resolution to see per-tool activity. |
 | **MLflow tracking server** | Stores the execution **traces** the dashboard visualizes. |
 | **Grafana `otel-lgtm`** | Receives the CPU/GPU **metrics** over OTLP and stores them (Prometheus), which the dashboard queries for the utilization timelines: system-wide GPU%, the Hermes process (plus children) CPU%, and per-tool CPU/GPU%. |
 | **Telemetry dashboard** | A custom Streamlit page that reads traces from MLflow and metrics from `otel-lgtm` to give one clear view of each run. |

@@ -25,10 +25,29 @@
 # Hugging Face cache as shown so the download is paid only once per host.
 # =============================================================================
 
-# The ROCm vLLM release image provides Python 3.12, PyTorch with HIP, and a
-# working vLLM install (including Muse-Glimmer-30B support), so the Kokoro TTS
-# server reuses that same PyTorch rather than installing a second multi-gigabyte
-# copy.
+# -----------------------------------------------------------------------------
+# LATEST-SOFTWARE-ALWAYS: ROCm 7.14.1 + vLLM 0.29.x, built from source
+# -----------------------------------------------------------------------------
+# The prebuilt vllm/vllm-openai-rocm release images (even v0.29.0) are still
+# built on ROCm 7.2.3 / Ubuntu 22.04 (verified 2026-09-16 from vLLM's own
+# docker/Dockerfile.rocm_base at the v0.29.0 tag: BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete).
+# To ship BOTH the newest ROCm (7.14.1) AND the newest vLLM (0.29.x) we build
+# vLLM from its released source tag on the ROCm 7.14.1 dev base, using a torch
+# wheel from the pytorch.org rocm7.14 channel. This exact recipe was proven end
+# to end on a live MI300X on 2026-09-16 (vllm 0.29.0+rocm714 on torch
+# 2.14.0+rocm7.14 serving over the OpenAI API with real GPU inference).
+#
+# Muse-Glimmer-30B support was merged upstream in PR #51655 (2026-08-14, shipped
+# in vLLM >= 0.28.1), so it is NATIVE in 0.29.x: no source overlay is needed,
+# unlike earlier revisions of this image that cloned vLLM and rsynced PR #51655's
+# .py files onto an older release.
+#
+# The ROCm 7.14.1 dev base ships system Python 3.12 with NO conda, so a single
+# venv holds torch, vLLM, Kokoro TTS, MLflow, Streamlit and JupyterLab. Kokoro
+# requires Python <3.13, which 3.12 satisfies, so no second interpreter is
+# needed. Prepending the venv to PATH makes a bare `python3` resolve to it
+# everywhere (entrypoint, Jupyter kernels), matching how helper.sh expects it.
+
 # The Grafana otel-lgtm metrics backend is pulled in as a build stage so it ships
 # inside this image and runs as a local process. utils/helper.sh runs the same
 # `grafana/otel-lgtm` image as a sibling container; there is no nested Docker
@@ -43,7 +62,7 @@
 FROM grafana/otel-lgtm:latest AS lgtm
 RUN env | grep -E '_VERSION=' > /otel-lgtm.env
 
-FROM vllm/vllm-openai-rocm:v0.28.0
+FROM rocm/dev-ubuntu-24.04:7.14.1-full
 
 LABEL org.opencontainers.image.title="AMD Agentic AI Profiling Workshop"
 LABEL org.opencontainers.image.description="Profile and optimize an AI agent on AMD Instinct MI300X: Hermes Agent, MLflow telemetry, Kokoro TTS, JupyterLab."
@@ -51,9 +70,17 @@ LABEL org.opencontainers.image.vendor="AMD"
 LABEL org.opencontainers.image.source="https://github.com/shailensobhee/amd-agentic-ai-profiling-workshop"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# The vLLM venv is first on PATH so a bare `python3` resolves to it everywhere.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PATH="/root/.local/bin:${PATH}" \
+    VLLM_VENV=/opt/vllm-venv \
+    PATH="/opt/vllm-venv/bin:/opt/rocm/bin:/root/.local/bin:${PATH}" \
+    ROCM_PATH=/opt/rocm \
+    HIP_PATH=/opt/rocm \
+    PYTORCH_ROCM_ARCH=gfx942 \
+    HSA_NO_SCRATCH_RECLAIM=1 \
+    LD_LIBRARY_PATH="/opt/rocm/lib" \
     HF_HOME=/root/.cache/huggingface \
     WORKSHOP_DIR=/workshop \
     HERMES_PROFILING_CACHE_DIR=/workshop/profiling_cache \
@@ -75,11 +102,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   docker run -e HERMES_PROXY_BASE="https://my-proxy" ...
 
 # -----------------------------------------------------------------------------
-# 1. OS packages
+# 1. OS packages (runtime + vLLM build toolchain)
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates procps lsof espeak-ng libsndfile1 \
-        ripgrep tini \
+        ripgrep tini rsync \
+        python3.12-venv python3.12-dev build-essential cmake ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 # Grafana otel-lgtm payload (OTel collector + Prometheus + Grafana), started by
@@ -88,10 +116,55 @@ COPY --from=lgtm /otel-lgtm /otel-lgtm
 COPY --from=lgtm /otel-lgtm.env /otel-lgtm/lgtm.env
 
 # -----------------------------------------------------------------------------
-# 2. Kokoro TTS, dashboard, MLflow and JupyterLab dependencies
+# 2. vLLM 0.29.x built from source on ROCm 7.14.1 (native Muse-Glimmer)
 # -----------------------------------------------------------------------------
-# Installed into the image's own Python so Kokoro reuses the ROCm PyTorch that
-# is already present. Tested with mlflow 3.16.0.
+# Pinned to a released tag for reproducibility; bump VLLM_VERSION to move it.
+# torch/torchvision come from the pytorch.org rocm7.14 channel, which serves the
+# newest torch built for ROCm 7.14. That wheel is self-contained (it bundles
+# triton-rocm and a full rocm-sdk 7.14 pip stack), so no separate ROCm/triton
+# source build is needed.
+ARG VLLM_VERSION=0.29.0
+RUN python3 -m venv "${VLLM_VENV}" \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir --upgrade pip wheel setuptools setuptools_scm \
+    && echo "===== torch from the rocm7.14 channel =====" \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir torch torchvision \
+        --index-url https://download.pytorch.org/whl/rocm7.14 \
+    && TORCH_VER="$("${VLLM_VENV}/bin/python" -c 'import torch; print(torch.__version__)')" \
+    && TORCH_HIP="$("${VLLM_VENV}/bin/python" -c 'import torch; print(torch.version.hip or "")')" \
+    && echo "resolved torch: ${TORCH_VER} (hip ${TORCH_HIP})" \
+    && if [ -z "${TORCH_HIP}" ]; then echo "ERROR: torch has no HIP build" >&2; exit 1; fi \
+    && echo "===== amd-smi python wheel (from the ROCm tree) =====" \
+    && if [ -d /opt/rocm/share/amd_smi ]; then \
+         "${VLLM_VENV}/bin/pip" install --no-cache-dir /opt/rocm/share/amd_smi; \
+       else echo "warn: /opt/rocm/share/amd_smi missing"; fi \
+    && echo "===== vLLM build-time deps =====" \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir --upgrade \
+        numba scipy "huggingface-hub[cli]" hf_transfer \
+    && echo "===== clone + build vLLM v${VLLM_VERSION} =====" \
+    && git clone -q --branch "v${VLLM_VERSION}" --depth 1 \
+        https://github.com/vllm-project/vllm.git /opt/vllm-src \
+    && cd /opt/vllm-src \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir -r requirements/rocm.txt \
+    # requirements/rocm.txt must not knock torch off its ROCm HIP build.
+    && _hip_after="$("${VLLM_VENV}/bin/python" -c 'import torch; print(torch.version.hip or "")')" \
+    && if [ -z "${_hip_after}" ]; then echo "ERROR: ROCm torch lost after rocm.txt" >&2; exit 1; fi \
+    # pip install . is broken for vLLM on ROCm; setup.py develop is the path.
+    && "${VLLM_VENV}/bin/python" setup.py develop \
+    && VLLM_BUILT="$("${VLLM_VENV}/bin/python" -c 'import vllm; print(vllm.__version__)')" \
+    && echo "built vllm: ${VLLM_BUILT}" \
+    && if [ "${VLLM_BUILT%%+*}" != "${VLLM_VERSION}" ]; then \
+         echo "ERROR: vLLM version mismatch: built ${VLLM_BUILT}, asked ${VLLM_VERSION}" >&2; exit 1; \
+       fi \
+    # Muse-Glimmer is native in >=0.28.1; assert the parsers register (no overlay).
+    && "${VLLM_VENV}/bin/python" -c "from vllm.tool_parsers import ToolParserManager; assert ToolParserManager.get_tool_parser('muse_glimmer'); print('tool parser OK')" \
+    && "${VLLM_VENV}/bin/python" -c "from vllm.reasoning import ReasoningParserManager; assert ReasoningParserManager.get_reasoning_parser('muse_glimmer'); print('reasoning parser OK')"
+
+# -----------------------------------------------------------------------------
+# 3. Kokoro TTS, dashboard, MLflow and JupyterLab dependencies
+# -----------------------------------------------------------------------------
+# Installed into the same venv so Kokoro reuses the ROCm 7.14 PyTorch that vLLM
+# uses, rather than a second multi-gigabyte copy. Python 3.12 satisfies Kokoro's
+# `>=3.10,<3.13` constraint, so no separate interpreter is required.
 RUN python3 -m pip install --no-cache-dir \
         kokoro soundfile fastapi 'uvicorn[standard]' \
         'streamlit>=1.30' mlflow \
@@ -104,7 +177,7 @@ RUN python3 -m pip install --no-cache-dir \
     && python3 -c "import kokoro, soundfile, streamlit, mlflow, jupyterlab; print('workshop deps OK')"
 
 # -----------------------------------------------------------------------------
-# 3. Hermes Agent
+# 4. Hermes Agent
 # -----------------------------------------------------------------------------
 RUN curl -fsSL \
         https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh \
@@ -116,17 +189,34 @@ RUN curl -fsSL \
     && hermes --version
 
 # -----------------------------------------------------------------------------
-# 4. hermes-otel plugin
+# 5. hermes-otel plugin
 # -----------------------------------------------------------------------------
-# Install the hermes-otel plugin (per-span CPU/GPU profiling) into the image
-# Python and the Hermes venv, since the plugin runs inside Hermes. Checks out the
-# latest release tag. Tested on hermes-otel-v1.3.0.
+# Install the hermes-otel plugin (per-span CPU/GPU profiling) into the venv and
+# the Hermes venv, since the plugin runs inside Hermes. Checks out the latest
+# release tag. Tested on hermes-otel-v1.3.0.
+#
+# GPU sampling must use the `rocm-smi` subprocess path, NOT the in-process
+# amdsmi Python binding: on ROCm 7.14 / glibc 2.39 (Ubuntu 24.04) calling
+# amdsmi.amdsmi_init() on the host-metrics sampler thread concurrently with
+# Hermes agent init heap-corrupts the process (glibc `corrupted size vs.
+# prev_size` abort, verified on an MI300X VF 2026-09-16). Upstream v1.3.0 has
+# no toggle for this: _amd_init() calls amdsmi_init() unconditionally and the
+# rocm-smi path is only a per-field fallback AFTER init. So we apply
+# utils/hermes_otel_rocm_smi_gpu.patch.py, which rewrites _amd_init() and
+# _amd_gpu_stats() to source detection and per-tick busy%/power/VRAM purely
+# from a single `rocm-smi` subprocess call (identical metrics, no native
+# amdsmi in the agent process). The patch is idempotent and self-verifies.
+COPY utils/hermes_otel_rocm_smi_gpu.patch.py /tmp/hermes_otel_rocm_smi_gpu.patch.py
 RUN git clone https://github.com/briancaffey/hermes-otel.git \
         /root/.hermes/plugins/hermes_otel \
     && cd /root/.hermes/plugins/hermes_otel \
     && HERMES_OTEL_VERSION="$(git tag -l 'hermes-otel-v*' | sort -V | tail -1)" \
     && echo "Using latest hermes-otel release: ${HERMES_OTEL_VERSION:-<none, default branch>}" \
     && if [ -n "${HERMES_OTEL_VERSION}" ]; then git checkout -q "${HERMES_OTEL_VERSION}"; fi \
+    && python3 /tmp/hermes_otel_rocm_smi_gpu.patch.py \
+        /root/.hermes/plugins/hermes_otel/hermes_otel/gpu_probe.py \
+    && grep -q PURE_ROCM_SMI_PATCH /root/.hermes/plugins/hermes_otel/hermes_otel/gpu_probe.py \
+    && rm -f /tmp/hermes_otel_rocm_smi_gpu.patch.py \
     && python3 -m pip install --no-cache-dir -e . \
     # Install the plugin's dependencies into the Hermes venv as well. Discover
     # the venv location rather than hardcoding it.
@@ -143,10 +233,10 @@ RUN git clone https://github.com/briancaffey/hermes-otel.git \
     && "${HERMES_VENV_PY}" -m pip install --no-cache-dir -q \
         opentelemetry-api==1.44.0 opentelemetry-sdk==1.44.0 \
         opentelemetry-exporter-otlp-proto-http==1.44.0 \
-        amdsmi psutil requests
+        psutil requests
 
 # -----------------------------------------------------------------------------
-# 5. Workshop content
+# 6. Workshop content
 # -----------------------------------------------------------------------------
 WORKDIR /workshop
 COPY tts.ipynb tts_executed.ipynb README.md ./
@@ -162,7 +252,7 @@ RUN mkdir -p /workshop/outputs /root/.hermes/workspace \
              /root/.config/miopen/miopen-lockfiles
 
 # -----------------------------------------------------------------------------
-# 6. Preconfigure Hermes and the profiling plugin
+# 7. Preconfigure Hermes and the profiling plugin
 # -----------------------------------------------------------------------------
 # Baked in so the container starts already pointing at the local vLLM server.
 RUN hermes config set model.provider custom \
@@ -206,11 +296,11 @@ RUN printf '%s\n' \
 
 # MLflow 3.x OTLP ingestion rejects spans that carry no experiment header with
 # HTTP 422, so the x-mlflow-experiment-id header above is what makes traces land.
-# The plugin needs nothing from ~/.hermes/.env (it reads config.yaml above),
-# matching utils/helper.sh, so no .env is written.
+# The plugin reads config.yaml above; the rocm-smi GPU sampler is baked in by
+# the patch applied at plugin-install time, so no ~/.hermes/.env is needed here.
 
 # -----------------------------------------------------------------------------
-# 7. Entrypoint
+# 8. Entrypoint
 # -----------------------------------------------------------------------------
 COPY utils/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
