@@ -4,9 +4,11 @@
 #
 # Starts the local Kokoro TTS server and waits until it answers /health.
 #
-# Called from the workshop notebook (Step 4), after the Edge TTS baseline has
-# been profiled, so the local GPU engine comes up as its own visible step.
-# utils/helper.sh deliberately does not start it.
+# Called from the workshop notebook, after the Edge TTS baseline has been
+# profiled, so the local GPU engine comes up as its own visible step.
+# utils/helper.sh on a bare host and utils/docker-entrypoint.sh inside the
+# workshop image both prepare what this depends on (the env/ interpreter, the
+# dependencies, the GPU environment) and leave the server itself to this script.
 #
 # Safe to re-run: a healthy server already on the port is left alone rather
 # than a second one being started.
@@ -34,7 +36,11 @@ if [ ! -f "$KOKORO_SERVER" ]; then
 fi
 
 if [ ! -x "$APP_ENV/bin/python" ]; then
-    echo "[ERROR] $APP_ENV/bin/python not found. Has utils/helper.sh finished?"
+    echo "[ERROR] $APP_ENV/bin/python not found."
+    echo "        On a bare host it is created by utils/helper.sh: check that it"
+    echo "        has finished and reported no errors."
+    echo "        In the workshop container it ships in the image, so check that"
+    echo "        no volume is mounted over /workshop."
     exit 1
 fi
 
@@ -57,8 +63,10 @@ for i in $(seq 1 120); do
         # Report the device instead of the raw /health JSON. Worth one line:
         # the engine falls back to CPU when ROCm is not visible, and a CPU run
         # still works, just far slower, which would quietly ruin the profiling.
+        # torch.cuda.get_device_name() returns an empty string on some ROCm
+        # builds, so the GPU name is only appended when there is one.
         device=$(curl -s "http://localhost:$KOKORO_PORT/health" |
-            "$APP_ENV/bin/python" -c 'import json,sys; h=json.load(sys.stdin); print(h["device"], "-", h["gpu"])' 2>/dev/null)
+            "$APP_ENV/bin/python" -c 'import json,sys; h=json.load(sys.stdin); g=(h.get("gpu") or "").strip(); print(h["device"] + (" (" + g + ")" if g else ""))' 2>/dev/null)
         echo "[OK] Kokoro TTS server is active on ${device:-unknown device}."
         exit 0
     fi

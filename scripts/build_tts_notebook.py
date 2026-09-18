@@ -593,8 +593,10 @@ around the package. It converts the library into a long-running service.
 
 ### Install Kokoro and start the server
 
-The cell below installs the `kokoro` package and the server's web dependencies into
-that environment. It is safe to re-run; pip skips what is already present.
+The server runs in the workshop's shared virtual environment, `env/`, which
+`utils/helper.sh` created during setup. The cell below installs the `kokoro` package
+and the server's web dependencies into it. It is safe to re-run; pip skips what is
+already present.
 """
 )
 

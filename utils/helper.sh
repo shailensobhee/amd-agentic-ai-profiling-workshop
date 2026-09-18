@@ -88,6 +88,12 @@ TTS_PORT=8092
 # dashboard, MLflow client).
 APP_ENV="$WORKSPACE_DIR/env"
 
+# Share of VRAM vLLM reserves for the agent model. vLLM's own default of 0.92
+# fails to start whenever anything else already holds memory, and the rest is
+# what the Kokoro model the notebook starts later loads into. Lower it on a busy
+# GPU: GPU_MEMORY_UTILIZATION=0.70 bash utils/helper.sh
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.80}"
+
 # ===========================================================================
 # Helpers and lifecycle management
 # ===========================================================================
@@ -216,7 +222,7 @@ sudo docker run -d \
         --model $HERMES_MODEL \
         --port $VLLM_HERMES_PORT \
         --tensor-parallel-size 1 \
-        --gpu-memory-utilization 0.6 \
+        --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
         --enable-auto-tool-choice \
         --tool-call-parser muse_glimmer \
         --reasoning-parser muse_glimmer \
@@ -400,13 +406,17 @@ sudo docker run -d --name lgtm \
     -p 3000:3000 -p 4317:4317 -p 4318:4318 -p 9090:9090 \
     grafana/otel-lgtm
 
-echo "[INFO] Waiting for Grafana (LGTM) /api/health on port 3000..."
+# The dashboard reads the metrics from the Prometheus store on :9090, so that is
+# what has to be serving before setup continues. Grafana's own /api/health on
+# :3000 answers 200 as soon as its web server is up, which says nothing about the
+# store behind it, and the bundled services do not come up in a fixed order.
+echo "[INFO] Waiting for the LGTM metrics store (Prometheus /-/ready on port 9090)..."
 lgtm_ready=0
 for i in $(seq 1 60); do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/api/health")
+    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:9090/-/ready")
     code="${code:-000}"
     if [ "$code" -eq 200 ]; then
-        echo "[OK] Grafana LGTM is up."
+        echo "[OK] LGTM metrics store is ready."
         lgtm_ready=1
         break
     fi
@@ -417,9 +427,9 @@ for i in $(seq 1 60); do
     sleep 2
 done
 if [ "$lgtm_ready" -ne 1 ]; then
-    fail "Grafana LGTM" ""
+    fail "LGTM metrics store (Prometheus on :9090)" ""
 fi
-echo "[INFO] Grafana UI at $(service_url 3000) (metrics also queryable at :9090)"
+echo "[INFO] CPU/GPU metrics on :9090, which the dashboard queries (Grafana UI at $(service_url 3000))"
 
 # ===========================================================================
 # Hermes Installation & Configuration
@@ -458,6 +468,10 @@ hermes config set terminal.cwd "$WORKSPACE_DIR"
 hermes config set tool_output.max_bytes 150000
 hermes config set tool_output.max_lines 5000
 hermes config set tool_output.max_line_length 5000
+# Keep the model's reasoning out of the agent's output. The notebook cells are
+# read as a transcript of what the agent did, and the reasoning stream buries
+# the tool calls and timings the workshop is about.
+hermes config set display.show_reasoning false
 
 # ===========================================================================
 # Playwright and browser dependencies (browser-driving Hermes tools)
@@ -802,11 +816,11 @@ ensure_miopen_jit_headers() {
 
 ensure_miopen_jit_headers
 
-# No local TTS server is launched here by design. The notebook starts it in
-# Step 4, after the cloud baseline has been profiled, so participants see the
-# local GPU engine come up as a distinct step rather than finding it already
-# running. Everything above (venv, ROCm wheels, MIOpen JIT headers) is the
-# platform setup that launch depends on, and stays here.
+# No local TTS server is launched here by design. The notebook starts it once
+# the cloud baseline has been profiled, so participants see the local GPU engine
+# come up as a distinct step rather than finding it already running. Everything
+# above (venv, ROCm wheels, MIOpen JIT headers) is the platform setup that launch
+# depends on, and stays here.
 echo "[INFO] GPU environment ready; the notebook starts the local TTS server."
 
 # ===========================================================================
@@ -923,7 +937,7 @@ echo -e "\n=====================================================================
 echo "[OK] Setup complete."
 echo "  vLLM endpoint (API):  $(service_url "$VLLM_HERMES_PORT")v1"
 echo "  MLflow tracking:      $(service_url 5004)"
-echo "  Grafana (CPU/GPU):    $(service_url 3000)"
+echo "  CPU/GPU metrics:      $(service_url 9090) (Prometheus; Grafana UI on 3000)"
 echo "  Telemetry dashboard:  $(service_url 8501)"
 echo "  (browser link base: HERMES_PROXY_BASE=\"$HERMES_PROXY_BASE\" - set \"\" for 127.0.0.1, or a host/IP)"
 echo "========================================================================="

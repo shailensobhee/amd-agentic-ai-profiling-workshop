@@ -59,8 +59,9 @@ The default TTS uses Edge TTS, which has some limitations. We therefore use a lo
 | :--- | :--- |
 | `tts.ipynb` | **The workshop notebook.** Start here. |
 | `tts_executed.ipynb` | The same notebook with all cells already executed, so you can read the expected outputs without a GPU. |
-| `utils/helper.sh` | One-shot launcher for the full backend (agent, telemetry, dashboard, Kokoro server). |
+| `utils/helper.sh` | One-shot launcher for the full backend (agent, telemetry, dashboard). |
 | `utils/kokoro_server.py` | The local Kokoro TTS server (FastAPI + Uvicorn), including the batched inference path. |
+| `utils/start_kokoro_server.sh` | Launches the Kokoro TTS server and waits until it answers `/health`. The notebook triggers it for the local Kokoro runs the optimization builds on. |
 | `utils/hermes_profiler.py` | The Streamlit telemetry dashboard. |
 | `utils/requirements.txt` | Python dependencies for the notebook and dashboard. |
 | `utils/clear_cache.sh` | Clears the GPU kernel cache for cold-run benchmarks. |
@@ -147,7 +148,7 @@ python -m pip install -r utils/requirements.txt
 
 ### 4. Start the backend (leave this terminal open)
 
-In a **separate terminal**, set `HERMES_PROXY_BASE` and launch the full stack. This one script starts the agent model, the hermes-otel telemetry plugin, MLflow, Grafana `otel-lgtm`, the Kokoro TTS server, and the dashboard:
+In a **separate terminal**, set `HERMES_PROXY_BASE` and launch the full stack. This one script starts the agent model, the hermes-otel telemetry plugin, MLflow, Grafana `otel-lgtm`, and the dashboard, and prepares the GPU environment the local TTS server needs:
 
 ```bash
 export HERMES_PROXY_BASE=""
@@ -186,7 +187,7 @@ echo '{"@jupyterlab/apputils-extension:themes": {"theme": "JupyterLab Dark"}}' >
 
 ---
 
-## What `utils/helper.sh` starts
+## The workshop backend
 
 <p align="center">
   <img src="assets/diagrams/02_architecture.png" alt="Architecture: the Hermes Agent runtime calls the Kokoro TTS server on the MI300X; hermes-otel sends execution traces to MLflow and CPU/GPU metrics to Grafana otel-lgtm; the Streamlit dashboard reads traces from MLflow and metrics from otel-lgtm to show one clear view" width="94%">
@@ -199,7 +200,16 @@ echo '{"@jupyterlab/apputils-extension:themes": {"theme": "JupyterLab Dark"}}' >
 | MLflow tracking server | `5004` | Stores the execution traces the dashboard visualizes. |
 | Grafana `otel-lgtm` | `4318` / `9090` | Receives the CPU/GPU metrics over OTLP and stores them (Prometheus), which the dashboard queries. |
 | Telemetry dashboard (Streamlit) | `8501` | A clean overview of each run: spans, CPU/GPU timeline, tool breakdown. |
-| Kokoro TTS server | `8092` | The local, self-hosted TTS engine used in the optimization step. |
+| Kokoro TTS server | `8092` | The local, self-hosted TTS engine used in the optimization step. **The notebook starts this one** (see below). |
+
+> **The local TTS server is started from the notebook.** `helper.sh` prepares
+> everything its launch depends on (the shared `env/` venv, the ROCm PyTorch
+> wheels, the MIOpen JIT headers) and leaves the server itself to the notebook,
+> which runs `bash utils/start_kokoro_server.sh` once the cloud (Edge TTS)
+> baseline has been profiled and the workshop moves to local Kokoro. The script
+> is safe to re-run: a healthy server already on the port is left alone. The
+> Docker path behaves the same way; `utils/docker-entrypoint.sh` leaves the
+> server to that same notebook cell.
 
 ---
 
@@ -222,7 +232,9 @@ After `utils/helper.sh` is running, these are reachable on the host (replace `<s
 | `which hermes` prints nothing in the notebook | `utils/helper.sh` has not finished starting, or the notebook was launched from a different environment. Wait for the backend, then relaunch Jupyter from the same shell. |
 | Dashboard shows no runs | Click **Fetch**. Runs appear newest first; select the top one. |
 | First Kokoro run is slow | Cold-run GPU kernel compilation. Subsequent runs reuse the cached kernels and are much faster. |
+| `kokoro_tts` cannot connect on port `8092` | The TTS server is not running. Re-run the notebook cell that starts it (`bash utils/start_kokoro_server.sh`) and check `kokoro_server.log` in the repository root. |
 | A port is already in use | `utils/helper.sh` frees its ports on start, but a stale process may linger. Stop it, then rerun. |
+| vLLM cannot reserve enough VRAM | Another process is holding GPU memory. vLLM takes an `0.80` share by default; lower it with `GPU_MEMORY_UTILIZATION=0.70 bash utils/helper.sh`. |
 
 ---
 

@@ -4,11 +4,16 @@
 # All-in-one workshop image for AMD Instinct MI300X.
 #
 # Everything runs INSIDE this single container: vLLM (Muse-Glimmer-30B), the
-# Hermes agent with the hermes-otel OpenTelemetry plugin, the Kokoro TTS server,
-# MLflow, Grafana otel-lgtm, the Streamlit telemetry dashboard, and JupyterLab.
+# Hermes agent with the hermes-otel OpenTelemetry plugin, MLflow, Grafana
+# otel-lgtm, the Streamlit telemetry dashboard, and JupyterLab.
 # There is no nested Docker, unlike utils/helper.sh which orchestrates sibling
 # containers on a bare host. See utils/docker-entrypoint.sh for the in-container
 # service manager.
+#
+# The local Kokoro TTS server is the one service the entrypoint does not start.
+# The notebook starts it with utils/start_kokoro_server.sh, as it does on a bare
+# host under utils/helper.sh, so this image ships what that launch depends on:
+# the dependencies and the env/ interpreter the notebook calls.
 #
 # BUILD (from the repo root):
 #   docker build -f utils/Dockerfile -t amd-agentic-ai-profiling:mi300x .
@@ -27,8 +32,8 @@
 
 # The ROCm vLLM release image provides Python 3.12, PyTorch with HIP, and a
 # working vLLM install (including Muse-Glimmer-30B support), so the Kokoro TTS
-# server reuses that same PyTorch rather than installing a second multi-gigabyte
-# copy.
+# server the notebook starts reuses that same PyTorch rather than installing a
+# second multi-gigabyte copy.
 # The Grafana otel-lgtm metrics backend is pulled in as a build stage so it ships
 # inside this image and runs as a local process. utils/helper.sh runs the same
 # `grafana/otel-lgtm` image as a sibling container; there is no nested Docker
@@ -77,9 +82,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # -----------------------------------------------------------------------------
 # 1. OS packages
 # -----------------------------------------------------------------------------
+# python3-venv supplies the venv module used by step 5b to build /workshop/env;
+# procps supplies the pkill used by the entrypoint to stop the TTS server.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates procps lsof espeak-ng libsndfile1 \
-        ripgrep tini \
+        python3-venv ripgrep tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Grafana otel-lgtm payload (OTel collector + Prometheus + Grafana), started by
@@ -92,6 +99,10 @@ COPY --from=lgtm /otel-lgtm.env /otel-lgtm/lgtm.env
 # -----------------------------------------------------------------------------
 # Installed into the image's own Python so Kokoro reuses the ROCm PyTorch that
 # is already present. Tested with mlflow 3.16.0.
+#
+# The `kokoro` package ships in the image so the build is self-contained. The
+# notebook's install cell resolves against what is already present and completes
+# immediately, rather than downloading the package as on a bare host.
 RUN python3 -m pip install --no-cache-dir \
         kokoro soundfile fastapi 'uvicorn[standard]' \
         'streamlit>=1.30' mlflow \
@@ -162,6 +173,24 @@ RUN mkdir -p /workshop/outputs /root/.hermes/workspace \
              /root/.config/miopen/miopen-lockfiles
 
 # -----------------------------------------------------------------------------
+# 5b. /workshop/env: the interpreter the notebook's TTS cells call
+# -----------------------------------------------------------------------------
+# The notebook runs `./env/bin/pip install ...`, and
+# utils/start_kokoro_server.sh execs "$WORKSPACE_DIR/env/bin/python", so both
+# resolve against this venv. utils/helper.sh provides it on a bare host; in the
+# image it is built here, which keeps the notebook identical in both.
+#
+# --system-site-packages lets the venv use the ROCm PyTorch and the step 2
+# dependencies rather than a second multi-gigabyte copy of them.
+RUN python3 -m venv --system-site-packages /workshop/env \
+    && /workshop/env/bin/python -m pip install --no-cache-dir -q --upgrade pip \
+    # Assert the two entry points the notebook calls, and that the venv resolves
+    # the image's GPU PyTorch rather than shadowing it.
+    && test -x /workshop/env/bin/pip \
+    && /workshop/env/bin/python -c \
+        "import torch, kokoro; print('env/ sees torch', torch.__version__, 'and kokoro', kokoro.__version__)"
+
+# -----------------------------------------------------------------------------
 # 6. Preconfigure Hermes and the profiling plugin
 # -----------------------------------------------------------------------------
 # Baked in so the container starts already pointing at the local vLLM server.
@@ -174,6 +203,9 @@ RUN hermes config set model.provider custom \
     && hermes config set tool_output.max_bytes 150000 \
     && hermes config set tool_output.max_lines 5000 \
     && hermes config set tool_output.max_line_length 5000 \
+    # Keep the model's reasoning out of the agent's output, as helper.sh does:
+    # the reasoning stream buries the tool calls and timings the workshop reads.
+    && hermes config set display.show_reasoning false \
     && hermes plugins enable hermes_otel --allow-tool-override
 
 # hermes-otel plugin config, identical to the one utils/helper.sh writes: traces

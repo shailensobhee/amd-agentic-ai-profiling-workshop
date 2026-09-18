@@ -13,9 +13,12 @@
 #   0. Grafana otel-lgtm        :9090   CPU/GPU metrics backend (Prometheus)
 #   1. vLLM (Muse-Glimmer-30B)  :8001   the agent's model
 #   2. MLflow tracking server   :5004   records the execution traces
-#   3. Kokoro TTS server        :8092   local TTS on the MI300X
-#   4. Streamlit dashboard      :8501   telemetry overview
-#   5. JupyterLab               :8888   the workshop front door
+#   3. Streamlit dashboard      :8501   telemetry overview
+#   4. JupyterLab               :8888   the workshop front door
+#
+# The local Kokoro TTS server (:8092) is not part of that list. The notebook
+# starts it with utils/start_kokoro_server.sh once the Edge TTS baseline has been
+# profiled, as it does on a bare host under helper.sh.
 #
 # Usage:
 #   serve       start everything and stay in the foreground (default)
@@ -28,7 +31,11 @@ WORKSHOP_DIR="${WORKSHOP_DIR:-/workshop}"
 UTILS_DIR="${WORKSHOP_DIR}/utils"
 LOG_DIR="${WORKSHOP_DIR}/logs"
 VLLM_HERMES_PORT="${VLLM_HERMES_PORT:-8001}"
+# Port of the local TTS server the notebook starts. Exported so
+# utils/start_kokoro_server.sh, run from a JupyterLab kernel, binds the port
+# this script reports and cleans up.
 KOKORO_PORT="${KOKORO_PORT:-8092}"
+export KOKORO_PORT
 MLFLOW_PORT="${MLFLOW_PORT:-5004}"
 # Grafana otel-lgtm payload, copied from the grafana/otel-lgtm image by the
 # Dockerfile. Receives OTLP metrics on :4318 and serves Prometheus on :9090.
@@ -48,10 +55,11 @@ HERMES_GPU="${HERMES_GPU:-0}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-3600}"
 JUPYTER_TOKEN="${JUPYTER_TOKEN:-}"
 # vLLM defaults to 0.92, which fails to start whenever anything else already
-# holds VRAM (another tenant, a stale process, or our own Kokoro server). The
-# workshop only needs a 30B model plus a modest KV cache, so a lower default
-# trades headroom we do not use for a container that actually starts. Override
-# with -e GPU_MEMORY_UTILIZATION=... on a dedicated GPU.
+# holds VRAM (another tenant, or a stale process). The workshop only needs a 30B
+# model plus a modest KV cache, so a lower default trades headroom we do not use
+# for a container that starts reliably and leaves room for the Kokoro model the
+# notebook loads later. Override with -e GPU_MEMORY_UTILIZATION=... on a
+# dedicated GPU.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.80}"
 
 mkdir -p "${LOG_DIR}" "${WORKSHOP_DIR}/outputs" \
@@ -86,6 +94,9 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         [ -n "${pid}" ] && kill "${pid}" 2>/dev/null
     done
+    # The TTS server runs under a JupyterLab kernel, so it is not one of the PIDs
+    # above. Stop it by name to release its VRAM.
+    pkill -f "${UTILS_DIR}/kokoro_server.py" 2>/dev/null
     wait 2>/dev/null
     log "Stopped."
 }
@@ -141,6 +152,13 @@ start_services() {
     fi
     log "GPU devices present. Detected:"
     amd-smi static 2>/dev/null | grep -m2 MARKET_NAME || log "  (amd-smi unavailable)"
+
+    # Clear the MIOpen and comgr kernel caches on every start, as helper.sh does
+    # on a bare host. The workshop's first local TTS run shows cold-run kernel
+    # compilation, which a cache carried over from an earlier run hides.
+    log "Clearing the GPU kernel caches..."
+    bash "${UTILS_DIR}/clear_cache.sh" \
+        || fail "GPU kernel cache clear (${UTILS_DIR}/clear_cache.sh)" ""
 
     # Report VRAM already held by other processes. vLLM sizes its allocation
     # against free memory, so a busy GPU is a common cause of startup failure.
@@ -218,14 +236,24 @@ start_services() {
     PIDS+=($!)
     wait_for "http://localhost:${MLFLOW_PORT}/health" "MLflow" 300 "${LOG_DIR}/mlflow.log"
 
-    # --- 3. Kokoro TTS -------------------------------------------------------
-    log "Starting Kokoro TTS server on port ${KOKORO_PORT}..."
-    ( cd "${WORKSHOP_DIR}" && KOKORO_PORT="${KOKORO_PORT}" \
-        python3 "${UTILS_DIR}/kokoro_server.py" > "${LOG_DIR}/kokoro.log" 2>&1 ) &
-    PIDS+=($!)
-    wait_for "http://localhost:${KOKORO_PORT}/health" "Kokoro TTS" 900 "${LOG_DIR}/kokoro.log"
+    # The local TTS server is launched by the notebook. Everything it depends on
+    # ships in the image: the dependencies, the env/ interpreter
+    # utils/start_kokoro_server.sh runs, and the ROCm header tree below.
+    #
+    # Kokoro's text encoder runs an LSTM that MIOpen compiles with HIPRTC at
+    # runtime, which needs the ROCm headers on disk rather than the runtime
+    # libraries alone. Without them the kernel fails as
+    # "miopenStatusUnknownError" in _VF.lstm, naming no missing file, so their
+    # absence is reported here.
+    if [ -f /opt/rocm/include/hip/hip_runtime.h ]; then
+        log "MIOpen JIT headers present."
+    else
+        log "WARNING: /opt/rocm/include/hip/hip_runtime.h is missing; the TTS"
+        log "         server may fail with miopenStatusUnknownError in _VF.lstm."
+    fi
+    log "GPU environment ready; the notebook starts the local TTS server (:${KOKORO_PORT})."
 
-    # --- 4. Telemetry dashboard ---------------------------------------------
+    # --- 3. Telemetry dashboard ---------------------------------------------
     log "Starting telemetry dashboard on port ${DASHBOARD_PORT}..."
     # Streamlit resolves .streamlit/config.toml from the PROCESS CWD, not from
     # the script's directory. The config lives in utils/, so launching from
@@ -285,7 +313,7 @@ PYPROBE
     fi
     log "  Telemetry dashboard imports all resolve."
 
-    # --- 5. JupyterLab -------------------------------------------------------
+    # --- 4. JupyterLab -------------------------------------------------------
     log "Starting JupyterLab on port ${JUPYTER_PORT}..."
     ( cd "${WORKSHOP_DIR}" && jupyter lab \
         --ip=0.0.0.0 --port="${JUPYTER_PORT}" --no-browser --allow-root \
@@ -295,7 +323,7 @@ PYPROBE
     PIDS+=($!)
     wait_for "http://localhost:${JUPYTER_PORT}/api" "JupyterLab" 300 "${LOG_DIR}/jupyter.log"
 
-    # --- 6. vLLM last: it is the slowest, everything else is already usable ---
+    # --- 5. vLLM last: it is the slowest, everything else is already usable ---
     if ! wait_for "http://localhost:${VLLM_HERMES_PORT}/v1/models" \
              "vLLM (${HERMES_MODEL})" "${VLLM_READY_TIMEOUT}" \
              "${LOG_DIR}/vllm.log" 0 "${VLLM_PID}"; then
@@ -318,6 +346,7 @@ PYPROBE
     log "  Telemetry dashboard     : $(service_url "${DASHBOARD_PORT}")"
     log "  MLflow UI               : $(service_url "${MLFLOW_PORT}")"
     log "  vLLM OpenAI API         : $(service_url "${VLLM_HERMES_PORT}")v1"
+    log "  Local TTS server (:${KOKORO_PORT}) is started from the notebook."
     log "  (container IP: ${ip:-unknown}; link base HERMES_PROXY_BASE=\"${HERMES_PROXY_BASE}\"; logs in ${LOG_DIR})"
     if [ -z "${JUPYTER_TOKEN}" ]; then
         log "  JupyterLab has no token. Set -e JUPYTER_TOKEN=... to require one."

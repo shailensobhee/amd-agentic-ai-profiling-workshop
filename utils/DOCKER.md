@@ -19,7 +19,7 @@ nested Docker and no host setup beyond the GPU devices.
 | MLflow tracking server | `5004` | The agent's execution traces. |
 | Grafana `otel-lgtm` | `9090` / `3000` | CPU/GPU metrics (Prometheus on 9090, queried by the dashboard; Grafana UI on 3000). |
 | vLLM (Muse-Glimmer-30B) | `8001` | The agent's model, OpenAI-compatible API. |
-| Kokoro TTS server | `8092` | Local TTS on the MI300X. |
+| Kokoro TTS server | `8092` | Local TTS on the MI300X. **The notebook starts this one**, the same as on a bare host. |
 
 Also baked in: the Hermes Agent (preconfigured to use the local vLLM), the
 `hermes-otel` plugin, the custom `kokoro_tts` tool, the notebooks, and all
@@ -31,6 +31,18 @@ workshop assets.
 > so the container uses `utils/docker-entrypoint.sh` instead, which starts the
 > same services (including `otel-lgtm`) as local processes and reaches the GPU
 > directly. Both paths produce the same workshop.
+
+> **The local TTS server is started from the notebook, in both paths.**
+> `helper.sh` and `docker-entrypoint.sh` bring up everything its launch depends
+> on (the dependencies, the `env/` interpreter, the GPU environment) and leave
+> the server itself to the notebook cell that runs
+> `bash utils/start_kokoro_server.sh`, once the cloud baseline has been profiled
+> and the workshop moves to local Kokoro. The notebook cells are identical in the
+> container and on a bare host: the image ships `/workshop/env`, so `./env/bin/pip` and
+> `utils/start_kokoro_server.sh` resolve there too. The server logs to
+> `/workshop/kokoro_server.log`, alongside `/workshop/logs/` which holds the
+> services the entrypoint starts, and the script is safe to re-run: a healthy
+> server already on the port is left alone.
 
 ---
 
@@ -148,12 +160,24 @@ smoke-checked. The following were confirmed end to end inside the container:
 
 | Check | Result |
 | :--- | :--- |
-| All five services reach a healthy endpoint | MLflow 5s, Kokoro 45s, dashboard 5s, JupyterLab 5s, vLLM about 4 min from a warm cache |
+| Every service the entrypoint starts reaches a healthy endpoint | MLflow 5s, dashboard 5s, JupyterLab 5s, vLLM about 4 min from a warm cache |
+| Kokoro TTS server reaches a healthy endpoint | About 45s to answer `/health` on the MI300X |
 | vLLM serves the model | `max_model_len = 131072`, above the 64K minimum Hermes requires |
 | Real GPU inference | Chat completion returned the expected text with a populated `reasoning` field, confirming the `muse_glimmer` parsers |
 | Kokoro TTS on the GPU | `POST /tts/wav` returned 200 and produced 94 s of 24 kHz audio |
 | Agent tool use | Hermes called `kokoro_tts` with the `text_file` parameter and wrote real WAV output |
 | Profiling telemetry | MLflow recorded runs carrying vLLM cache-hit metrics |
+
+Re-confirmed on an MI300X after the TTS launch moved to the notebook:
+
+| Check | Result |
+| :--- | :--- |
+| Entrypoint services | `otel-lgtm`, MLflow, dashboard and JupyterLab healthy within 5s each; vLLM 245s from a warm cache |
+| Startup cache clear | Ran before any service started |
+| Port `8092` before the notebook | Nothing listening, and no `logs/kokoro.log` written |
+| `bash utils/start_kokoro_server.sh` | Server came up on `cuda:0`; `/health` returned 200; re-running it left the healthy server alone |
+| GPU synthesis in both modes | `POST /tts/wav` returned 24 kHz mono WAV; RTF 0.52 sequential against 0.21 batched |
+| VRAM headroom | vLLM at `0.80` left 33 GB free for the Kokoro model |
 
 ---
 
@@ -168,5 +192,8 @@ smoke-checked. The following were confirmed end to end inside the container:
 | Port already in use | Change the host side of the mapping, for example `-p 9999:8888`. |
 | `vLLM could not reserve enough VRAM` | Another process is holding GPU memory. The entrypoint reports how much at startup. Retry with a lower `-e GPU_MEMORY_UTILIZATION=0.70`. |
 | Agent loops without producing audio | The `kokoro_tts` tool failed to register. The image asserts this at build time, so this should not happen. Check with `docker exec <name> ls /usr/local/lib/hermes-agent/tools/kokoro_tts_tool.py`. |
+| `kokoro_tts` fails with a connection error on port 8092 | The TTS server is not running. Re-run the notebook cell that starts it (`bash utils/start_kokoro_server.sh`) and check `/workshop/kokoro_server.log`. |
 
-Logs for every service live in `/workshop/logs/` inside the container.
+Logs for the services the entrypoint starts live in `/workshop/logs/` inside the
+container. The TTS server the notebook starts logs to
+`/workshop/kokoro_server.log`.
