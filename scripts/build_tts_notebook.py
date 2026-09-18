@@ -226,16 +226,20 @@ plugin's default, so the timelines can resolve per-tool activity).
 )
 
 img("02_architecture.png",
-    "Architecture of the backend that utils/helper.sh starts: the Hermes Agent runtime "
-    "(vLLM, Muse-Glimmer-30B) calls the Kokoro TTS server on the MI300X; "
-    "hermes-otel sends execution traces to the MLflow tracking server and CPU/GPU "
-    "metrics to Grafana otel-lgtm; the Streamlit telemetry dashboard reads traces "
-    "from MLflow and metrics from otel-lgtm to show one clear view.",
-    "One command brings up the whole observability stack.",
+    "The Hermes profiling architecture: the Hermes Agent runtime "
+    "(vLLM, Muse-Glimmer-30B) calls a TTS tool, either the cloud Edge TTS baseline or "
+    "the local Kokoro server on the MI300X, which runs sequential then batched; "
+    "hermes-otel sends execution traces to the "
+    "MLflow tracking server and CPU/GPU metrics to Grafana otel-lgtm; the Streamlit "
+    "telemetry dashboard reads traces from MLflow and metrics from otel-lgtm to show "
+    "one clear view.",
+    "The whole architecture of Hermes profiling. <code>utils/helper.sh</code> brings up "
+    "the agent runtime, hermes-otel, MLflow, Grafana LGTM and the dashboard, and "
+    "prepares the GPU environment the Kokoro server needs.",
     width="94%")
 
 md(
-"""Behind the scenes it brings up:
+"""Behind the scenes, `utils/helper.sh` brings up:
 
 | Service | Role |
 | :--- | :--- |

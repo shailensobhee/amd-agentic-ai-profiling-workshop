@@ -190,7 +190,7 @@ echo '{"@jupyterlab/apputils-extension:themes": {"theme": "JupyterLab Dark"}}' >
 ## The workshop backend
 
 <p align="center">
-  <img src="assets/diagrams/02_architecture.png" alt="Architecture: the Hermes Agent runtime calls the Kokoro TTS server on the MI300X; hermes-otel sends execution traces to MLflow and CPU/GPU metrics to Grafana otel-lgtm; the Streamlit dashboard reads traces from MLflow and metrics from otel-lgtm to show one clear view" width="94%">
+  <img src="assets/diagrams/02_architecture.png" alt="The Hermes profiling architecture: the Hermes Agent runtime calls a TTS tool, either the cloud Edge TTS baseline or the local Kokoro server on the MI300X, which runs sequential then batched; hermes-otel sends execution traces to MLflow and CPU/GPU metrics to Grafana otel-lgtm; the Streamlit dashboard reads traces from MLflow and metrics from otel-lgtm to show one clear view" width="94%">
 </p>
 
 | Service | Port | Role |

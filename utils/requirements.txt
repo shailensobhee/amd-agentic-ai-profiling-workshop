@@ -9,3 +9,4 @@ anyio
 requests
 ipywidgets
 matplotlib
+cairosvg>=2.7

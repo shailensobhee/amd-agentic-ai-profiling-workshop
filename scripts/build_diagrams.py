@@ -147,9 +147,10 @@ def d_pipeline():
 # =============================================================================
 def d_architecture():
     W, H = 960, 560
-    b = [text(W/2, 40, "What one command starts for you", size=22, weight="bold")]
+    b = [text(W/2, 40, "The Hermes profiling architecture", size=22, weight="bold")]
     b.append(text(W/2, 64,
-                  "bash helper.sh: the full observability backend, no manual setup",
+                  "bash utils/helper.sh brings up the agent runtime, hermes-otel, "
+                  "MLflow, Grafana LGTM and the dashboard",
                   size=14, fill=SUBINK, family=FONT))
 
     # Agent brain (top-left)
@@ -169,13 +170,28 @@ def d_architecture():
     b.append(text(480, 146, "instruments", size=10, fill=SUBINK, anchor="middle"))
     b.append(line(420, 156, 540, 156, color=INK))
 
-    # Kokoro server (under agent, called as a tool)
-    b.append(card(40, 250, 380, 96, "#E9F7F8", TEAL))
-    b.append(text(230, 278, "Kokoro TTS server", size=15, weight="bold", fill=TEAL))
-    b.append(text(230, 302, "FastAPI + Uvicorn on MI300X", size=13, fill=SUBINK))
-    b.append(text(230, 324, "model stays resident in GPU memory", size=12.5, fill=SUBINK))
+    # The two TTS backends the agent calls: the cloud baseline it starts from,
+    # and the local server the workshop moves to.
+    b.append(card(40, 250, 380, 144, PANEL, LINE))
+    b.append(text(230, 274, "TTS tools the agent calls", size=14, weight="bold", fill=INK))
     b.append(line(230, 216, 230, 250, color=INK))
     b.append(text(292, 242, "calls as a tool", size=11, fill=SUBINK, anchor="start"))
+
+    # Edge TTS: the cloud default Hermes ships with.
+    b.append(card(54, 286, 160, 94, "#EAF2FB", BLUE, rx=10, shadow=False))
+    b.append(text(134, 310, "Edge TTS", size=14.5, weight="bold", fill=BLUE))
+    b.append(text(134, 330, "cloud baseline", size=12, fill=SUBINK))
+    b.append(text(134, 348, "network round-trip", size=11.5, fill=SUBINK))
+
+    # One or the other serves a given run, never both, so the gap is labelled.
+    b.append(text(230, 338, "or", size=13.5, weight="bold", fill=SUBINK))
+
+    # Kokoro: the local engine the optimization is built on, in both its modes.
+    b.append(card(246, 286, 160, 94, "#E9F7F8", TEAL, rx=10, shadow=False))
+    b.append(text(326, 310, "Kokoro server", size=14.5, weight="bold", fill=TEAL))
+    b.append(text(326, 330, "local on MI300X", size=12, fill=SUBINK))
+    b.append(text(326, 348, "model resident in VRAM", size=11.5, fill=SUBINK))
+    b.append(text(326, 366, "sequential → batched", size=11.5, fill=TEAL, weight="bold"))
 
     # hermes-otel fans out to TWO backends: traces -> MLflow, metrics -> Grafana LGTM.
     # MLflow (traces)
@@ -206,6 +222,11 @@ def d_architecture():
     # LGTM Prometheus -> dashboard (CPU/GPU)
     b.append(line(829, 346, 640, 442, color=INK))
     b.append(text(770, 400, "CPU / GPU :9090", size=10.5, fill=SUBINK, anchor="start"))
+    b.append(text(W/2, 546,
+                  "helper.sh installs the ROCm PyTorch and MIOpen JIT headers the "
+                  "Kokoro server needs; the notebook starts it when the workshop "
+                  "switches to local TTS.",
+                  size=12, fill=SUBINK))
     save("02_architecture", svg(W, H, "".join(b)))
 
 
