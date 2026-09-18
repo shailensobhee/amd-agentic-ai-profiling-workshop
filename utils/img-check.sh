@@ -75,6 +75,47 @@ else
     fail=1
 fi
 
+echo "[img-check] TTS server handoff to the notebook"
+# The notebook starts the Kokoro server, as it does on a bare host under
+# utils/helper.sh. Three things in the image carry that handoff; any one of them
+# missing surfaces only when a participant runs the cell that starts the server.
+#
+# 1. The entrypoint leaves the server to the notebook. cleanup()'s pkill is its
+#    only reference to kokoro_server.py; any other one launches the server.
+if grep -n 'kokoro_server\.py' /usr/local/bin/docker-entrypoint.sh \
+   | grep -qv 'pkill'; then
+    note "MISS entrypoint launches kokoro_server.py; the notebook starts it"
+    fail=1
+else
+    note "OK   entrypoint leaves the TTS server to the notebook"
+fi
+
+# 2. The script that cell runs.
+if [ -f /workshop/utils/start_kokoro_server.sh ]; then
+    note "OK   utils/start_kokoro_server.sh present"
+else
+    note "MISS /workshop/utils/start_kokoro_server.sh absent; the notebook cannot start the server"
+    fail=1
+fi
+
+# 3. The interpreter the cell and that script call, carrying GPU PyTorch and
+#    Kokoro. helper.sh provides it on a bare host; the Dockerfile provides it here.
+for bin in /workshop/env/bin/python /workshop/env/bin/pip; do
+    if [ -x "$bin" ]; then
+        note "OK   ${bin}"
+    else
+        note "MISS ${bin} absent; the notebook's './env/bin/...' cells cannot run"
+        fail=1
+    fi
+done
+
+if /workshop/env/bin/python -c 'import torch, kokoro' 2>/dev/null; then
+    note "OK   env/ interpreter imports torch and kokoro"
+else
+    note "MISS env/ interpreter cannot import torch and kokoro"
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "[img-check] FAILED"
     exit 1

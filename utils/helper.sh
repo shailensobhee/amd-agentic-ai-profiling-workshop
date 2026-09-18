@@ -9,7 +9,7 @@ export TMPDIR="$HOME/tmp"
 mkdir -p "$TMPDIR"
 
 # This script lives in utils/, so resolve its siblings (clear_cache.sh,
-# kokoro_server.py, hermes_profiler.py, the profiling patch) relative to the
+# hermes_profiler.py, the profiling patch) relative to the
 # script itself. WORKSPACE_DIR is the repo root, where the notebook, the env/
 # venv, input_text.txt and outputs/ live, and where the agent's terminal.cwd
 # points. Resolving paths this way lets the script be invoked from anywhere,
@@ -85,10 +85,18 @@ bash "$UTILS_DIR/clear_cache.sh"
 
 HERMES_MODEL="meta-models/Muse-Glimmer-30B"
 
-# Local Kokoro TTS server (sequential + batched inference modes).
-KOKORO_PORT=8092
-KOKORO_ENV="$WORKSPACE_DIR/env"
-KOKORO_SERVER="$UTILS_DIR/kokoro_server.py"
+# Local TTS server port. The server itself is started from the notebook; the
+# port is declared here only so cleanup can free it on exit.
+TTS_PORT=8092
+# Shared virtualenv for the local Python services (TTS server, Streamlit
+# dashboard, MLflow client).
+APP_ENV="$WORKSPACE_DIR/env"
+
+# Share of VRAM vLLM reserves for the agent model. vLLM's own default of 0.92
+# fails to start whenever anything else already holds memory, and the rest is
+# what the Kokoro model the notebook starts later loads into. Lower it on a busy
+# GPU: GPU_MEMORY_UTILIZATION=0.70 bash utils/helper.sh
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.80}"
 
 # ===========================================================================
 # Helpers and lifecycle management
@@ -111,11 +119,14 @@ cleanup() {
     fi
     sudo fuser -k 5004/tcp >/dev/null 2>&1
 
-    echo "[INFO] Stopping Kokoro TTS server..."
-    if [ -n "$KOKORO_PID" ]; then
-        kill "$KOKORO_PID" >/dev/null 2>&1
+    # The TTS server is started from the notebook, not by this script, so there
+    # is normally no PID to kill here - clear the port instead. The PID branch is
+    # kept for the case where an older run of this script did start it.
+    echo "[INFO] Stopping local TTS server..."
+    if [ -n "$TTS_PID" ]; then
+        kill "$TTS_PID" >/dev/null 2>&1
     fi
-    sudo fuser -k ${KOKORO_PORT}/tcp >/dev/null 2>&1
+    sudo fuser -k ${TTS_PORT}/tcp >/dev/null 2>&1
 
     echo "[INFO] Stopping hermes_service container..."
     sudo docker stop hermes_service >/dev/null 2>&1
@@ -148,7 +159,7 @@ fail() {
 # Declared up front so cleanup can reference them safely even if Ctrl+C arrives
 # before the corresponding server is started.
 MLFLOW_PID=""
-KOKORO_PID=""
+TTS_PID=""
 STREAMLIT_PID=""
 
 # Catch Ctrl+C and termination so containers are always cleaned up.
@@ -215,7 +226,7 @@ sudo docker run -d \
         --model $HERMES_MODEL \
         --port $VLLM_HERMES_PORT \
         --tensor-parallel-size 1 \
-        --gpu-memory-utilization 0.6 \
+        --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
         --enable-auto-tool-choice \
         --tool-call-parser muse_glimmer \
         --reasoning-parser muse_glimmer \
@@ -399,13 +410,17 @@ sudo docker run -d --name lgtm \
     -p 3000:3000 -p 4317:4317 -p 4318:4318 -p 9090:9090 \
     grafana/otel-lgtm
 
-echo "[INFO] Waiting for Grafana (LGTM) /api/health on port 3000..."
+# The dashboard reads the metrics from the Prometheus store on :9090, so that is
+# what has to be serving before setup continues. Grafana's own /api/health on
+# :3000 answers 200 as soon as its web server is up, which says nothing about the
+# store behind it, and the bundled services do not come up in a fixed order.
+echo "[INFO] Waiting for the LGTM metrics store (Prometheus /-/ready on port 9090)..."
 lgtm_ready=0
 for i in $(seq 1 60); do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/api/health")
+    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:9090/-/ready")
     code="${code:-000}"
     if [ "$code" -eq 200 ]; then
-        echo "[OK] Grafana LGTM is up."
+        echo "[OK] LGTM metrics store is ready."
         lgtm_ready=1
         break
     fi
@@ -416,9 +431,9 @@ for i in $(seq 1 60); do
     sleep 2
 done
 if [ "$lgtm_ready" -ne 1 ]; then
-    fail "Grafana LGTM" ""
+    fail "LGTM metrics store (Prometheus on :9090)" ""
 fi
-echo "[INFO] Grafana UI at $(service_url 3000) (metrics also queryable at :9090)"
+echo "[INFO] CPU/GPU metrics on :9090, which the dashboard queries (Grafana UI at $(service_url 3000))"
 
 # ===========================================================================
 # Hermes Installation & Configuration
@@ -457,6 +472,10 @@ hermes config set terminal.cwd "$WORKSPACE_DIR"
 hermes config set tool_output.max_bytes 150000
 hermes config set tool_output.max_lines 5000
 hermes config set tool_output.max_line_length 5000
+# Keep the model's reasoning out of the agent's output. The notebook cells are
+# read as a transcript of what the agent did, and the reasoning stream buries
+# the tool calls and timings the workshop is about.
+hermes config set display.show_reasoning false
 
 # ===========================================================================
 # Playwright and browser dependencies (browser-driving Hermes tools)
@@ -685,18 +704,19 @@ echo "[INFO] MLflow tracking available at $(service_url 5004)"
 # or env-driven CSV output is involved.
 
 # ===========================================================================
-# Kokoro TTS server
+# Shared Python environment
 # ===========================================================================
-echo "[INFO] Setting up the Kokoro TTS server environment ($KOKORO_ENV)..."
-if [ ! -d "$KOKORO_ENV" ]; then
-    echo "[INFO] Creating Python venv at $KOKORO_ENV..."
-    python3 -m venv "$KOKORO_ENV"
+# One virtualenv serves the local Python services: the TTS server the notebook
+# starts, the Streamlit telemetry dashboard, and the MLflow client.
+echo "[INFO] Setting up the shared Python environment ($APP_ENV)..."
+if [ ! -d "$APP_ENV" ]; then
+    echo "[INFO] Creating Python venv at $APP_ENV..."
+    python3 -m venv "$APP_ENV"
 fi
-"$KOKORO_ENV/bin/python" -m pip install -q --upgrade pip
+"$APP_ENV/bin/python" -m pip install -q --upgrade pip
 echo "[INFO] Installing PyTorch (ROCm 7.2)..."
-"$KOKORO_ENV/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
-echo "[INFO] Installing kokoro, soundfile, fastapi, uvicorn, streamlit..."
-"$KOKORO_ENV/bin/pip" install kokoro soundfile fastapi uvicorn
+"$APP_ENV/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
+
 
 # Install the dashboard's dependencies from utils/requirements.txt rather than
 # naming streamlit alone.
@@ -707,15 +727,15 @@ echo "[INFO] Installing kokoro, soundfile, fastapi, uvicorn, streamlit..."
 # dashboard up, because /_stcore/health returns 200 for a crashed app: the
 # Streamlit server is alive even when the script inside it is not.
 if [ -f "$UTILS_DIR/requirements.txt" ]; then
-    "$KOKORO_ENV/bin/pip" install -q -r "$UTILS_DIR/requirements.txt"
+    "$APP_ENV/bin/pip" install -q -r "$UTILS_DIR/requirements.txt"
 else
     echo "[WARN] $UTILS_DIR/requirements.txt not found; installing known deps."
-    "$KOKORO_ENV/bin/pip" install -q 'streamlit>=1.30' 'plotly>=5.18' 'pandas>=2.0' mlflow
+    "$APP_ENV/bin/pip" install -q 'streamlit>=1.30' 'plotly>=5.18' 'pandas>=2.0' mlflow
 fi
 
 # Assert every module the dashboard imports at top level actually resolves.
 # pip's exit code is not evidence the app can start.
-"$KOKORO_ENV/bin/python" - <<'PYDASH'
+"$APP_ENV/bin/python" - <<'PYDASH'
 import sys
 missing = []
 for mod in ("streamlit", "plotly", "plotly.graph_objects", "pandas", "mlflow"):
@@ -740,7 +760,7 @@ mkdir -p "$HOME/.config/miopen/miopen-lockfiles"
 # ---------------------------------------------------------------------------
 # MIOpen JIT headers
 # ---------------------------------------------------------------------------
-# Kokoro's text encoder runs an LSTM, and MIOpen compiles that kernel at runtime
+# LSTM kernels are compiled by MIOpen at runtime
 # with HIPRTC. That compile needs ROCm headers on disk, not just the runtime
 # libraries. Some AMD Dev Cloud ROCm images ship the libraries but omit the
 # header trees, and the resulting failure is misleading:
@@ -749,8 +769,8 @@ mkdir -p "$HOME/.config/miopen/miopen-lockfiles"
 #
 # with no mention of a missing file. Other GPU operations still succeed
 # (torch.cuda.is_available(), a matmul, a plain torch.nn.LSTM on GPU), so only
-# the JIT-compiled kernel fails and it presents as a Kokoro bug rather than a
-# missing header.
+# the JIT-compiled kernel fails, and it presents as an application bug rather
+# than a missing header.
 #
 # The ROCm docker images already on these hosts carry the full header tree, so
 # extract from one instead of relying on an apt repo (Dev Cloud images have no
@@ -775,7 +795,7 @@ ensure_miopen_jit_headers() {
 
     if [ -z "$src" ]; then
         echo "[WARN] No local ROCm image to extract headers from."
-        echo "       Kokoro may fail with 'miopenStatusUnknownError' in _VF.lstm."
+        echo "       LSTM kernels may fail with 'miopenStatusUnknownError' in _VF.lstm."
         return 0
     fi
 
@@ -794,36 +814,18 @@ ensure_miopen_jit_headers() {
        && [ -f /opt/rocm/include/hip/hip_runtime.h ]; then
         echo "[OK] MIOpen JIT headers installed from $src."
     else
-        echo "[WARN] Header extraction incomplete; Kokoro GPU synthesis may fail."
+        echo "[WARN] Header extraction incomplete; GPU LSTM kernels may fail."
     fi
 }
 
 ensure_miopen_jit_headers
 
-echo "[INFO] Launching Kokoro TTS server on port $KOKORO_PORT..."
-KOKORO_PORT=$KOKORO_PORT "$KOKORO_ENV/bin/python" "$KOKORO_SERVER" > "$WORKSPACE_DIR/kokoro_server.log" 2>&1 &
-KOKORO_PID=$!
-echo "[INFO] Kokoro server started (PID $KOKORO_PID, logs: $WORKSPACE_DIR/kokoro_server.log)."
-
-echo "[INFO] Waiting for Kokoro server /health on port $KOKORO_PORT..."
-kokoro_ready=0
-for i in $(seq 1 120); do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$KOKORO_PORT/health")
-    code="${code:-000}"
-    if [ "$code" -eq 200 ]; then
-        echo "[OK] Kokoro TTS server is active (sequential + batched)."
-        kokoro_ready=1
-        break
-    fi
-    # Fail fast if the background process already died.
-    if ! kill -0 "$KOKORO_PID" 2>/dev/null; then
-        break
-    fi
-    sleep 3
-done
-if [ "$kokoro_ready" -ne 1 ]; then
-    fail "Kokoro TTS server" "$WORKSPACE_DIR/kokoro_server.log"
-fi
+# No local TTS server is launched here by design. The notebook starts it once
+# the cloud baseline has been profiled, so participants see the local GPU engine
+# come up as a distinct step rather than finding it already running. Everything
+# above (venv, ROCm wheels, MIOpen JIT headers) is the platform setup that launch
+# depends on, and stays here.
+echo "[INFO] GPU environment ready; the notebook starts the local TTS server."
 
 # ===========================================================================
 # Telemetry dashboard (Streamlit)
@@ -832,18 +834,18 @@ fi
 # other machines.
 DASHBOARD_APP="$UTILS_DIR/hermes_profiler.py"
 if [ -f "$DASHBOARD_APP" ]; then
-    # Streamlit is installed into the Kokoro venv ($KOKORO_ENV), not system-wide,
+    # Streamlit is installed into the shared venv ($APP_ENV), not system-wide,
     # so a bare `streamlit` only resolves if that venv is on PATH. On a clean
     # host it is not, and the launch dies with "streamlit: command not found"
     # inside the redirected log, surfacing later as a "[FATAL] Streamlit
     # telemetry dashboard failed to start". Prefer the venv binary and fall
     # back to whatever is on PATH.
-    STREAMLIT_BIN="$KOKORO_ENV/bin/streamlit"
+    STREAMLIT_BIN="$APP_ENV/bin/streamlit"
     if [ ! -x "$STREAMLIT_BIN" ]; then
         STREAMLIT_BIN="$(command -v streamlit 2>/dev/null)"
     fi
     if [ -z "$STREAMLIT_BIN" ]; then
-        echo "[FATAL] streamlit not found in $KOKORO_ENV/bin or on PATH."
+        echo "[FATAL] streamlit not found in $APP_ENV/bin or on PATH."
         echo "        The venv install above should have provided it; check its output."
         exit 1
     fi
@@ -890,7 +892,7 @@ if [ -f "$DASHBOARD_APP" ]; then
     # Parse the app's own top-level imports and confirm each one resolves in the
     # interpreter Streamlit runs under. That is what the health endpoint cannot
     # tell us.
-    dash_bad="$("$KOKORO_ENV/bin/python" - "$DASHBOARD_APP" <<'PYPROBE'
+    dash_bad="$("$APP_ENV/bin/python" - "$DASHBOARD_APP" <<'PYPROBE'
 import ast
 import importlib.util
 import sys
@@ -925,7 +927,7 @@ PYPROBE
     if [ -n "$dash_bad" ]; then
         echo "[FATAL] The dashboard is serving an error page."
         echo "        $DASHBOARD_APP imports modules that are not installed in"
-        echo "        $KOKORO_ENV: $dash_bad"
+        echo "        $APP_ENV: $dash_bad"
         echo "        Note /_stcore/health still returns 200, which is why this"
         echo "        is checked separately."
         exit 1
@@ -938,9 +940,8 @@ fi
 echo -e "\n========================================================================="
 echo "[OK] Setup complete."
 echo "  vLLM endpoint (API):  $(service_url "$VLLM_HERMES_PORT")v1"
-echo "  Kokoro TTS (API):     $(service_url "$KOKORO_PORT")"
 echo "  MLflow tracking:      $(service_url 5004)"
-echo "  Grafana (CPU/GPU):    $(service_url 3000)"
+echo "  CPU/GPU metrics:      $(service_url 9090) (Prometheus; Grafana UI on 3000)"
 echo "  Telemetry dashboard:  $(service_url 8501)"
 echo "  (browser link base: HERMES_PROXY_BASE=\"$HERMES_PROXY_BASE\" - set \"\" for 127.0.0.1, or a host/IP)"
 echo "========================================================================="

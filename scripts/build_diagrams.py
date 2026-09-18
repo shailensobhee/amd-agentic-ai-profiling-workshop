@@ -147,9 +147,9 @@ def d_pipeline():
 # =============================================================================
 def d_architecture():
     W, H = 960, 560
-    b = [text(W/2, 40, "What one command starts for you", size=22, weight="bold")]
+    b = [text(W/2, 40, "Agentic profiling architecture", size=22, weight="bold")]
     b.append(text(W/2, 64,
-                  "bash helper.sh: the full observability backend, no manual setup",
+                  "The agent, its Edge and Kokoro TTS backends, and the observability stack",
                   size=14, fill=SUBINK, family=FONT))
 
     # Agent brain (top-left)
@@ -169,13 +169,28 @@ def d_architecture():
     b.append(text(480, 146, "instruments", size=10, fill=SUBINK, anchor="middle"))
     b.append(line(420, 156, 540, 156, color=INK))
 
-    # Kokoro server (under agent, called as a tool)
-    b.append(card(40, 250, 380, 96, "#E9F7F8", TEAL))
-    b.append(text(230, 278, "Kokoro TTS server", size=15, weight="bold", fill=TEAL))
-    b.append(text(230, 302, "FastAPI + Uvicorn on MI300X", size=13, fill=SUBINK))
-    b.append(text(230, 324, "model stays resident in GPU memory", size=12.5, fill=SUBINK))
-    b.append(line(230, 216, 230, 250, color=INK))
-    b.append(text(292, 242, "calls as a tool", size=11, fill=SUBINK, anchor="start"))
+    # TTS backends (under agent, called as a tool): the Edge cloud baseline and
+    # the local Kokoro engine the workshop optimizes. The agent calls whichever
+    # the notebook selects; both are reached through the same kokoro_tts tool path.
+    # Edge TTS (cloud baseline)
+    b.append(card(40, 250, 182, 96, "#FEF3E6", ORANGE))
+    b.append(text(131, 277, "Edge TTS", size=15, weight="bold", fill=ORANGE))
+    b.append(text(131, 299, "cloud baseline", size=13, fill=SUBINK))
+    b.append(text(131, 320, "network round-trip", size=12, fill=SUBINK))
+    # Kokoro TTS (local, on the MI300X)
+    b.append(card(238, 250, 182, 96, "#E9F7F8", TEAL))
+    b.append(text(329, 275, "Kokoro TTS server", size=13.5, weight="bold", fill=TEAL))
+    b.append(text(329, 296, "local, FastAPI on MI300X", size=11.5, fill=SUBINK))
+    b.append(text(329, 315, "resident in GPU memory", size=11.5, fill=SUBINK))
+    b.append(text(329, 333, "sequential \u2192 batched", size=11.5, fill=AMD_RED, weight="bold"))
+    # agent -> TTS backends: fork the single "calls as a tool" line to BOTH the
+    # Edge and Kokoro boxes so neither reads as orphaned.
+    b.append(line(230, 216, 230, 234, color=INK, arrow=False))
+    b.append(text(292, 230, "calls as a tool", size=11, fill=SUBINK, anchor="start"))
+    b.append(line(230, 234, 131, 234, color=INK, arrow=False))
+    b.append(line(230, 234, 329, 234, color=INK, arrow=False))
+    b.append(line(131, 234, 131, 250, color=INK))
+    b.append(line(329, 234, 329, 250, color=INK))
 
     # hermes-otel fans out to TWO backends: traces -> MLflow, metrics -> Grafana LGTM.
     # MLflow (traces)

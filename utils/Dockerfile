@@ -4,11 +4,16 @@
 # All-in-one workshop image for AMD Instinct MI300X.
 #
 # Everything runs INSIDE this single container: vLLM (Muse-Glimmer-30B), the
-# Hermes agent with the hermes-otel OpenTelemetry plugin, the Kokoro TTS server,
-# MLflow, Grafana otel-lgtm, the Streamlit telemetry dashboard, and JupyterLab.
+# Hermes agent with the hermes-otel OpenTelemetry plugin, MLflow, Grafana
+# otel-lgtm, the Streamlit telemetry dashboard, and JupyterLab.
 # There is no nested Docker, unlike utils/helper.sh which orchestrates sibling
 # containers on a bare host. See utils/docker-entrypoint.sh for the in-container
 # service manager.
+#
+# The local Kokoro TTS server is the one service the entrypoint does not start.
+# The notebook starts it with utils/start_kokoro_server.sh, as it does on a bare
+# host under utils/helper.sh, so this image ships what that launch depends on:
+# the dependencies and the env/ interpreter the notebook calls.
 #
 # BUILD (from the repo root):
 #   docker build -f utils/Dockerfile -t amd-agentic-ai-profiling:mi300x .
@@ -104,6 +109,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # -----------------------------------------------------------------------------
 # 1. OS packages (runtime + vLLM build toolchain)
 # -----------------------------------------------------------------------------
+# python3-venv supplies the venv module used by step 5b to build /workshop/env;
+# procps supplies the pkill used by the entrypoint to stop the TTS server.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates procps lsof espeak-ng libsndfile1 \
         ripgrep tini rsync \
@@ -158,6 +165,55 @@ RUN python3 -m venv "${VLLM_VENV}" \
     # Muse-Glimmer is native in >=0.28.1; assert the parsers register (no overlay).
     && "${VLLM_VENV}/bin/python" -c "from vllm.tool_parsers import ToolParserManager; assert ToolParserManager.get_tool_parser('muse_glimmer'); print('tool parser OK')" \
     && "${VLLM_VENV}/bin/python" -c "from vllm.reasoning import ReasoningParserManager; assert ReasoningParserManager.get_reasoning_parser('muse_glimmer'); print('reasoning parser OK')"
+
+# -----------------------------------------------------------------------------
+# 2b. AMD aiter (attention/MoE kernels) for the ROCM_AITER_FA backend
+# -----------------------------------------------------------------------------
+# utils/docker-entrypoint.sh (and utils/helper.sh) start vLLM with
+# VLLM_ROCM_USE_AITER=1 --attention-backend ROCM_AITER_FA, which imports AMD's
+# aiter kernels. The prebuilt vllm-openai-rocm image ships aiter; our from-source
+# build on the ROCm 7.14.1 dev base does not, so without this step vLLM aborts at
+# startup with "Selected backend ROCM_AITER_FA is not valid ... ['ImportError']"
+# (verified on a live MI300X 2026-09-17). We build the exact aiter branch vLLM
+# 0.29.0 pins in its own docker/Dockerfile.rocm_base (AITER_BRANCH=v0.1.19), into
+# the same venv, replicating that stage's flags (PREBUILD_KERNELS=1,
+# AITER_USE_SYSTEM_TRITON=1, GPU_ARCHS=gfx942 for MI300X).
+#
+# aiter's chip_info._detect_native() shells out to `rocminfo` to read the GPU
+# arch whenever GPU_ARCHS is unset or "native", and rocminfo exits non-zero in a
+# GPU-less build sandbox. aiter reads GPU_ARCHS with os.getenv("GPU_ARCHS",
+# "native") and only probes rocminfo when it resolves to "native", so pinning
+# GPU_ARCHS=gfx942 as a persistent ENV makes every build-time call (the
+# setup.py codegen AND the final `import aiter` self-check) skip that rocminfo
+# probe. At run time aiter's get_gfx_runtime() ignores GPU_ARCHS and always
+# uses the real /opt/rocm rocminfo on the live GPU, so runtime dispatch is
+# unaffected. (An earlier PATH rocminfo stub was ineffective: aiter resolves
+# rocminfo by its absolute /opt/rocm path, not via PATH; GPU_ARCHS is the real
+# fix.)
+#
+# Separately, the build-time `import aiter` line runs in a GPU-less sandbox where
+# aiter's torch import can fall back to the CPU path and segfault (Intel oneMKL /
+# libtorch_cpu.so) even after the kernels and wheel build cleanly. The kernels
+# and wheel are already installed by that point, so the build-time import is made
+# informational (|| echo) and the real import + a bf16 matmul are validated at
+# run time on the live MI300X instead. Verified green there 2026-09-18.
+ARG AITER_BRANCH=v0.1.19
+ARG AITER_REPO=https://github.com/ROCm/aiter.git
+ENV AITER_ROCM_ARCH=gfx942 \
+    GPU_ARCHS=gfx942
+RUN set -eux \
+    && cd /opt \
+    && git clone --recursive --branch "${AITER_BRANCH}" "${AITER_REPO}" aiter-src \
+    && cd aiter-src \
+    && git submodule update --init --recursive \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir -r requirements.txt \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir pyyaml \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 \
+         "${VLLM_VENV}/bin/python" setup.py bdist_wheel --dist-dir=dist \
+    && "${VLLM_VENV}/bin/pip" install --no-cache-dir dist/*.whl \
+    && rm -rf /opt/aiter-src \
+    && { "${VLLM_VENV}/bin/python" -c "import aiter; print('aiter build-import OK:', getattr(aiter,'__version__','?'))" \
+         || echo "[aiter] build-time import skipped (GPU-less build sandbox); import is validated at run time on the live MI300X"; }
 
 # -----------------------------------------------------------------------------
 # 3. Kokoro TTS, dashboard, MLflow and JupyterLab dependencies
@@ -252,7 +308,26 @@ RUN mkdir -p /workshop/outputs /root/.hermes/workspace \
              /root/.config/miopen/miopen-lockfiles
 
 # -----------------------------------------------------------------------------
-# 7. Preconfigure Hermes and the profiling plugin
+# 5b. /workshop/env: the interpreter the notebook's TTS cells call
+# -----------------------------------------------------------------------------
+# The notebook runs `./env/bin/pip install ...`, and
+# utils/start_kokoro_server.sh execs "$WORKSPACE_DIR/env/bin/python", so both
+# resolve against /workshop/env. utils/helper.sh builds it as a venv on a bare
+# host; in this image the interpreter that already carries torch, vLLM and Kokoro
+# is /opt/vllm-venv, so /workshop/env is a symlink to it rather than a second
+# venv. A `python3 -m venv --system-site-packages /workshop/env` would NOT work
+# here: created from the vLLM venv it resolves the SYSTEM site-packages, where
+# torch and kokoro are absent (they live in the vLLM venv), so the notebook's
+# ./env/bin/python could not import them. The symlink keeps the notebook path
+# identical to the bare host while pointing at the one interpreter that has the
+# GPU stack.
+RUN ln -sfn "${VLLM_VENV}" /workshop/env \
+    && test -x /workshop/env/bin/pip \
+    && /workshop/env/bin/python -c \
+        "import torch, kokoro; print('env/ sees torch', torch.__version__, 'and kokoro', kokoro.__version__)"
+
+# -----------------------------------------------------------------------------
+# 6. Preconfigure Hermes and the profiling plugin
 # -----------------------------------------------------------------------------
 # Baked in so the container starts already pointing at the local vLLM server.
 RUN hermes config set model.provider custom \
@@ -264,6 +339,9 @@ RUN hermes config set model.provider custom \
     && hermes config set tool_output.max_bytes 150000 \
     && hermes config set tool_output.max_lines 5000 \
     && hermes config set tool_output.max_line_length 5000 \
+    # Keep the model's reasoning out of the agent's output, as helper.sh does:
+    # the reasoning stream buries the tool calls and timings the workshop reads.
+    && hermes config set display.show_reasoning false \
     && hermes plugins enable hermes_otel --allow-tool-override
 
 # hermes-otel plugin config, identical to the one utils/helper.sh writes: traces
