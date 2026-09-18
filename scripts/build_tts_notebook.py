@@ -214,15 +214,75 @@ notebook.
 """
 )
 
+# ---- 2. Open in JupyterLab + start the backend -----------------------------
+md(
+"""---
+
+## Open this notebook in JupyterLab
+
+Run this tutorial in JupyterLab so the cells execute against the workshop
+environment. If you started the backend with the container command below, a
+JupyterLab URL (with its access token) is printed in the container logs:
+
+```bash
+docker logs amd-agentic-ai-profiling 2>&1 | grep -m1 'http://127.0.0.1:8888'
+```
+
+Open that link in your browser, then open this notebook file from the JupyterLab
+file browser. Every cell below runs inside the same environment as the backend, so
+paths and services resolve without extra configuration.
+"""
+)
+
+# ---- 2b. Start the backend (container-primary) ------------------------------
+md(
+"""## Start the workshop backend
+
+The entire workshop stack ships as one container image: the vLLM-served agent
+model, the `hermes-otel` telemetry plugin, the MLflow tracking server, Grafana
+`otel-lgtm`, the Kokoro TTS server and the Streamlit dashboard. Starting it is a
+single `docker run` from a host shell:
+
+```bash
+docker run -d --name amd-agentic-ai-profiling \\
+  --device=/dev/kfd --device=/dev/dri \\
+  --security-opt seccomp=unconfined --group-add video \\
+  --ipc=host --shm-size 16G \\
+  -p 8888:8888 -p 8501:8501 -p 5004:5004 \\
+  -v "$HOME/hf_cache:/root/.cache/huggingface" \\
+  shailensobhee1/amd-agentic-ai-profiling:mi300x
+```
+
+The container bundles every service and already has `ripgrep`, `ffmpeg`/`espeak`
+and the build tools installed, so there is nothing to install by hand and no setup
+prompts to answer. Give it a minute to pull the agent model on first start, then
+open JupyterLab as described above.
+
+> **Why `$HOME/hf_cache` and not `$HOME/.cache/huggingface`?** Docker creates the
+> host side of a bind mount **owned by you** if the directory does not exist yet.
+> Mounting a fresh `$HOME/hf_cache` means the Hugging Face cache is user-owned from
+> the start, so model downloads work even on clusters where you cannot `sudo chown`
+> a root-created `~/.cache/huggingface`. The container sees it as
+> `/root/.cache/huggingface` and all permissions just work.
+
+> **Advanced: run directly on the host instead.** If you prefer not to use the
+> container, `utils/helper.sh` performs the same setup on a bare host. It asks two
+> yes/no questions during the Hermes install (whether to install `ripgrep`/`ffmpeg`,
+> and whether to install build tools); answer `y` to both. It also uses `sudo` for a
+> few steps, so on a cluster with restricted `sudo` the container path above is the
+> more reliable choice.
+"""
+)
+
 # ---- 3. What utils/helper.sh does -------------------------------------------------
 md(
-"""## What `utils/helper.sh` sets up
+"""## What the backend sets up
 
-The backend is already running: `utils/helper.sh` (which you start per the README, or
-which the container image runs automatically) handles the whole setup. It installs the
-dependencies, starts the services below, and configures the `hermes-otel` plugin for
-fine-grained profiling (a 100 ms CPU/GPU sampling interval, much finer than the
-plugin's default, so the timelines can resolve per-tool activity).
+Whichever way you started it, the backend runs `utils/helper.sh` to bring the stack
+up. It installs the dependencies, starts the services below, and configures the
+`hermes-otel` plugin for fine-grained profiling (a 100 ms CPU/GPU sampling interval,
+much finer than the plugin's default, so the timelines can resolve per-tool
+activity).
 """
 )
 
@@ -444,10 +504,15 @@ To make the MLflow data easier to read, we built a custom Streamlit dashboard on
 port `8501`, started for you by `utils/helper.sh`. The cell below resolves your
 server address and gives you a direct link.
 
-> **Which link should you click?** Use the **`localhost`** link when the browser
-> runs on the same machine as the workshop (or when you forwarded the port with
-> `ssh -L 8501:localhost:8501`). Use the **server-IP** link when you are hitting a
-> remote machine directly and port `8501` is reachable from your network.
+> **About the links this cell prints.** On the default AMD hosted-notebook proxy
+> the cell prints the two service links directly (the dashboard and the raw MLflow
+> view), and those are the ones to use. Only when you run **locally** or **forward
+> the port** (`ssh -L 8501:localhost:8501`), by setting
+> `os.environ["HERMES_PROXY_BASE"] = ""`, does the cell additionally show a
+> **`localhost`** link; use that one in that case. If you are hitting a remote
+> machine directly and port `8501` is reachable from your network, use the
+> **server-IP** link. If a link does not load, see the **Troubleshooting** section
+> at the end of this notebook.
 
 **The dashboard has five tabs:**
 
@@ -1046,6 +1111,87 @@ it during that execution. Once cached, later runs with the same configuration re
 it.
 
 </details>
+"""
+)
+
+# ---- 15. Troubleshooting ----------------------------------------------------
+md(
+"""---
+
+## Troubleshooting
+
+A few issues come up often, mostly around permissions and reaching the services
+from a remote browser.
+
+**Model downloads or Kokoro install fail with a permission error.** This happens
+when `~/.cache/huggingface` was created by a root process and you cannot
+`sudo chown` it back (common on shared GPU clusters). Use the container start
+command above with a fresh, user-owned cache directory:
+`-v "$HOME/hf_cache:/root/.cache/huggingface"`. Docker creates `$HOME/hf_cache`
+owned by you, so downloads work without any `chown`.
+
+**The dashboard or MLflow link does not load from my laptop.** The links point at
+the machine running the backend. If that is a remote server:
+
+- Forward the ports over SSH and use the `localhost` links:
+  `ssh -L 8501:localhost:8501 -L 5004:localhost:5004 <user>@<server>`, then set
+  `os.environ["HERMES_PROXY_BASE"] = ""` in the link cell before running it.
+- Or, if ports `8501`/`5004` are directly reachable on your network, use the
+  server-IP links the cell prints.
+- On the AMD hosted-notebook proxy, use the proxied links exactly as printed and
+  leave `HERMES_PROXY_BASE` unset.
+
+**`ripgrep not installed (file search will use grep fallback)` warning.** This is
+harmless. It appears only on a bare-host Hermes install where the optional `ripgrep`
+package could not be installed; Hermes falls back to `grep` and everything still
+works. The container image already includes `ripgrep`, so you will not see it there.
+
+**`which hermes` prints nothing.** The JupyterLab kernel may not have inherited the
+login shell's `PATH`. Re-run the *Check your setup* cell, which adds both
+`/usr/local/bin` and `~/.local/bin` to `PATH`. If it still cannot find Hermes,
+confirm the backend has finished starting.
+
+> For deeper server reference and troubleshooting notes, see the workshop repo
+> README: <https://github.com/shailensobhee/amd-agentic-ai-profiling-workshop>.
+"""
+)
+
+# ---- 16. Cleanup ------------------------------------------------------------
+md(
+"""---
+
+## Cleanup
+
+This workshop writes a few artifacts (generated audio, input text, telemetry data)
+and, if you used the container, leaves it running. Clean up when you are done.
+
+**Generated files in the working directory:**
+
+```bash
+rm -f input_text.txt output_audio.mp3
+rm -rf outputs
+```
+
+**Stop the Kokoro server** (bare-host runs only; in the container it stops with the
+container):
+
+```bash
+pkill -f kokoro_server.py || true
+```
+
+**Stop and remove the container** (if you used the container start command):
+
+```bash
+docker stop amd-agentic-ai-profiling
+docker rm amd-agentic-ai-profiling
+```
+
+The Hugging Face cache in `$HOME/hf_cache` is kept so future runs do not re-download
+the models. Remove it too if you want to reclaim the disk:
+
+```bash
+rm -rf "$HOME/hf_cache"
+```
 """
 )
 

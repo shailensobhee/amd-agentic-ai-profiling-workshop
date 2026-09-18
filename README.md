@@ -106,7 +106,7 @@ docker run -d --name amd-agentic-ai-profiling \
   --ipc=host --shm-size 16G \
   -p 8888:8888 -p 8501:8501 -p 5004:5004 \
   -e HERMES_PROXY_BASE="" \
-  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -v "$HOME/hf_cache:/root/.cache/huggingface" \
   shailensobhee1/amd-agentic-ai-profiling:mi300x
 ```
 
