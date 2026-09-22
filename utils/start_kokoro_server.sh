@@ -26,7 +26,7 @@ UTILS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$UTILS_DIR/.." && pwd)"
 
 KOKORO_PORT="${KOKORO_PORT:-8092}"
-APP_ENV="$WORKSPACE_DIR/env"
+PY="$(command -v python3)"
 KOKORO_SERVER="$UTILS_DIR/kokoro_server.py"
 KOKORO_LOG="$WORKSPACE_DIR/kokoro_server.log"
 
@@ -35,12 +35,8 @@ if [ ! -f "$KOKORO_SERVER" ]; then
     exit 1
 fi
 
-if [ ! -x "$APP_ENV/bin/python" ]; then
-    echo "[ERROR] $APP_ENV/bin/python not found."
-    echo "        On a bare host it is created by utils/helper.sh: check that it"
-    echo "        has finished and reported no errors."
-    echo "        In the workshop container it ships in the image, so check that"
-    echo "        no volume is mounted over /workshop."
+if [ ! -x "$PY" ]; then
+    echo "[ERROR] python3 not found on PATH."
     exit 1
 fi
 
@@ -51,7 +47,7 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$KOKORO_PORT/he
 fi
 
 echo "[INFO] Launching Kokoro TTS server on port $KOKORO_PORT..."
-KOKORO_PORT=$KOKORO_PORT nohup "$APP_ENV/bin/python" "$KOKORO_SERVER" \
+KOKORO_PORT=$KOKORO_PORT nohup "$PY" "$KOKORO_SERVER" \
     > "$KOKORO_LOG" 2>&1 &
 KOKORO_PID=$!
 echo "[INFO] Started (PID $KOKORO_PID, logs: $KOKORO_LOG)."
@@ -66,7 +62,7 @@ for i in $(seq 1 120); do
         # torch.cuda.get_device_name() returns an empty string on some ROCm
         # builds, so the GPU name is only appended when there is one.
         device=$(curl -s "http://localhost:$KOKORO_PORT/health" |
-            "$APP_ENV/bin/python" -c 'import json,sys; h=json.load(sys.stdin); g=(h.get("gpu") or "").strip(); print(h["device"] + (" (" + g + ")" if g else ""))' 2>/dev/null)
+            "$PY" -c 'import json,sys; h=json.load(sys.stdin); g=(h.get("gpu") or "").strip(); print(h["device"] + (" (" + g + ")" if g else ""))' 2>/dev/null)
         echo "[OK] Kokoro TTS server is active on ${device:-unknown device}."
         exit 0
     fi
