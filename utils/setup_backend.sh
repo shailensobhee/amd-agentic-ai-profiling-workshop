@@ -163,6 +163,12 @@ backends:
     name: mlflow-traces
     endpoint: http://127.0.0.1:${MLFLOW_PORT}/v1/traces
     metrics: false
+    # MLflow 3.x OTLP trace ingestion requires the target experiment id as an
+    # HTTP header; without it every span batch is rejected with HTTP 422 and no
+    # traces are stored (the profiling dashboard would stay empty). "0" is the
+    # Default experiment MLflow creates on first start.
+    headers:
+      x-mlflow-experiment-id: "0"
   - type: lgtm
     name: prometheus-metrics
     endpoint: http://127.0.0.1:${PROM_PORT}/api/v1/otlp/v1/traces
@@ -192,4 +198,17 @@ wait_http "http://localhost:${MLFLOW_PORT}/health" "MLflow" 180 || true
 log "Waiting for vLLM to load the model (first run downloads weights)..."
 wait_http "http://localhost:${VLLM_PORT}/v1/models" "vLLM" 3600 || true
 
-log "Backend ready. JupyterLab :8888  vLLM :8001  MLflow :5004  Grafana :3000  Prometheus :9090"
+# --- Profiling dashboard (Streamlit) ------------------------------------
+# The show_session_overview() cells render an inline overview, but the full
+# five-tab dashboard is a Streamlit app. Launch it from utils/ so Streamlit
+# resolves utils/.streamlit/config.toml (the AMD theme); from any other CWD the
+# theme is silently dropped. Port 8501 matches the links the notebook prints.
+log "Launching the profiling dashboard on :8501..."
+pkill -f "streamlit run" 2>/dev/null || true; sleep 1
+( cd "${UTILS_DIR:-utils}" 2>/dev/null || cd utils
+  nohup "$(command -v streamlit)" run hermes_profiler.py \
+    --server.address 0.0.0.0 --server.port 8501 --server.headless true \
+    > /root/streamlit_dashboard.log 2>&1 & )
+wait_http "http://localhost:8501/_stcore/health" "Dashboard" 120 || true
+
+log "Backend ready. Dashboard :8501  JupyterLab :8888  vLLM :8001  MLflow :5004  Grafana :3000  Prometheus :9090"
