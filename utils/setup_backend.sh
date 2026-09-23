@@ -19,10 +19,15 @@ apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq espeak-ng libsndfile1 procps lsof ripgrep >/dev/null 2>&1 || true
 
 log "Installing Python packages (Kokoro, MLflow, dashboard, telemetry)..."
+# OpenTelemetry: the official vLLM image ships a coherent opentelemetry 1.40.0
+# stack, and lmcache (installed in the image) caps opentelemetry-api at <=1.40.0.
+# Pin the whole otel stack to 1.40.0 so pip's resolver stays consistent; bumping
+# only a couple of otel packages leaves the rest at 1.40.0 and breaks pip check.
+OTEL_PINS="opentelemetry-api==1.40.0 opentelemetry-sdk==1.40.0 opentelemetry-proto==1.40.0 opentelemetry-semantic-conventions==0.61b0 opentelemetry-exporter-otlp-proto-common==1.40.0 opentelemetry-exporter-otlp-proto-grpc==1.40.0 opentelemetry-exporter-otlp-proto-http==1.40.0 opentelemetry-exporter-otlp==1.40.0"
 python3 -m pip install -q \
   kokoro soundfile fastapi "uvicorn[standard]" \
   "streamlit>=1.30" "mlflow>=3.0.0" plotly pandas ipywidgets matplotlib kaleido \
-  "opentelemetry-sdk==1.44.0" "opentelemetry-exporter-otlp-proto-http==1.44.0" \
+  ${OTEL_PINS} \
   psutil requests
 
 # --- Metrics: upstream Prometheus (native OTLP receiver) + Grafana ---------
@@ -139,7 +144,7 @@ git clone -q https://github.com/briancaffey/hermes-otel.git /root/.hermes/plugin
   python3 -m pip install -q -e . >/dev/null 2>&1 || true
   if [ -n "${HVPY}" ]; then
     "${HVPY}" -m pip install -q -e . psutil requests \
-      "opentelemetry-sdk==1.44.0" "opentelemetry-exporter-otlp-proto-http==1.44.0" >/dev/null 2>&1 || true
+      ${OTEL_PINS} >/dev/null 2>&1 || true
   fi
 )
 # amdsmi (GPU metric source) ships with ROCm, not on the venv path. Expose it.
