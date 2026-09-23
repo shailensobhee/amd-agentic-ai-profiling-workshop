@@ -892,12 +892,15 @@ def fetch_session_traces(tracking_uri: str, session_id: str, experiment_id: str 
         # already resolved by the caller, so scope the search to it explicitly.
         if experiment_id:
             try:
-                traces = mlflow.search_traces(
-                    experiment_ids=[str(experiment_id)], max_results=2000)
-            except TypeError:
-                # Newer MLflow renamed experiment_ids to locations.
+                # Modern MLflow (3.x) renamed experiment_ids to locations and
+                # only WARNS (FutureWarning) on the old name rather than raising,
+                # so try locations first; fall back to experiment_ids on the
+                # older builds that predate the rename (they raise TypeError).
                 traces = mlflow.search_traces(
                     locations=[str(experiment_id)], max_results=2000)
+            except TypeError:
+                traces = mlflow.search_traces(
+                    experiment_ids=[str(experiment_id)], max_results=2000)
         else:
             traces = mlflow.search_traces(max_results=2000)
     except Exception as e:
@@ -1030,9 +1033,13 @@ def parse_timestamps(df: pd.DataFrame) -> pd.DataFrame:
     # that, so both signals share one offset-free axis. Older CSVs without that
     # column fall back to the local-time `timestamp` (may be offset from spans).
     if "start_time_unix_nano" in df.columns:
+        # Floor to microseconds: plotly's JSON serializer converts datetimes via
+        # to_pydatetime() (microsecond max) and warns "Discarding nonzero
+        # nanoseconds" on ns-precision Timestamps. Sub-us precision is
+        # irrelevant on a wall-clock chart, so drop it at the source.
         df["ts_abs"] = pd.to_datetime(
             pd.to_numeric(df["start_time_unix_nano"], errors="coerce"), unit="ns"
-        )
+        ).dt.floor("us")
     else:
         df["ts_abs"] = df["timestamp"]
     return df.dropna(subset=["timestamp"])
@@ -1453,9 +1460,9 @@ def build_session_waterfall_figure(traces, cpu_df, gpu_df, tool_df=None) -> go.F
         spans = [s for s in _order_spans(_norm_spans(tr)) if s["start"] is not None]
         if not spans:
             continue
-        turn_marks.append((turn, pd.to_datetime(min(s["start"] for s in spans), unit="ns")))
+        turn_marks.append((turn, pd.to_datetime(min(s["start"] for s in spans), unit="ns").floor("us")))
         for s in spans:
-            start_dt = pd.to_datetime(s["start"], unit="ns")
+            start_dt = pd.to_datetime(s["start"], unit="ns").floor("us")
             if s["end"] is not None:
                 dur = max((s["end"] - s["start"]) / 1e9, 1e-4)
             else:
