@@ -85,6 +85,20 @@ pkill -f 'grafana server' 2>/dev/null || true; sleep 1
     --homepath=/root/grafana > /root/grafana.log 2>&1 & )
 
 # --- vLLM: the agent's model, served with AITER on the MI300X --------------
+# Disk preflight: the model weights are ~60 GB. On a constrained host (small
+# quota, shared volume) the download dies partway and vLLM never binds :8001,
+# which used to surface only as a silent 3600s timeout. Warn loudly up front so
+# the operator can free space before waiting an hour for a doomed download.
+VLLM_MIN_FREE_GB="${VLLM_MIN_FREE_GB:-80}"
+HF_CACHE_DIR="${HF_HOME:-${HOME}/hf_cache}"; mkdir -p "${HF_CACHE_DIR}" 2>/dev/null || true
+FREE_GB="$(df -PBG "${HF_CACHE_DIR}" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4}')"
+FREE_GB="${FREE_GB:-0}"
+log "Disk free at ${HF_CACHE_DIR}: ${FREE_GB} GB (need >= ${VLLM_MIN_FREE_GB} GB for the model)."
+if [ "${FREE_GB}" -lt "${VLLM_MIN_FREE_GB}" ] 2>/dev/null; then
+  log "  WARNING: only ${FREE_GB} GB free; the ~60 GB model download will likely fail."
+  log "  Free up space (or point HF_HOME at a larger volume) before continuing."
+fi
+
 log "Starting vLLM (${HERMES_MODEL}); the first start downloads ~60 GB of weights..."
 pkill -f 'vllm.entrypoints.openai.api_server' 2>/dev/null || true; sleep 1
 HIP_VISIBLE_DEVICES=0 VLLM_ROCM_USE_AITER=1 \
@@ -201,7 +215,11 @@ wait_http "http://localhost:${PROM_PORT}/-/ready" "Prometheus" 120 || true
 wait_http "http://localhost:${GRAFANA_PORT}/api/health" "Grafana" 120 || true
 wait_http "http://localhost:${MLFLOW_PORT}/health" "MLflow" 180 || true
 log "Waiting for vLLM to load the model (first run downloads weights)..."
-wait_http "http://localhost:${VLLM_PORT}/v1/models" "vLLM" 3600 || true
+if wait_http "http://localhost:${VLLM_PORT}/v1/models" "vLLM" 3600; then
+  VLLM_OK=1
+else
+  VLLM_OK=0
+fi
 
 # --- Profiling dashboard (Streamlit) ------------------------------------
 # The show_session_overview() cells render an inline overview, but the full
@@ -216,4 +234,13 @@ pkill -f "streamlit run" 2>/dev/null || true; sleep 1
     > /root/streamlit_dashboard.log 2>&1 & )
 wait_http "http://localhost:8501/_stcore/health" "Dashboard" 120 || true
 
-log "Backend ready. Dashboard :8501  JupyterLab :8888  vLLM :8001  MLflow :5004  Grafana :3000  Prometheus :9090"
+if [ "${VLLM_OK:-0}" = "1" ]; then
+  log "Backend ready. Dashboard :8501  JupyterLab :8888  vLLM :8001  MLflow :5004  Grafana :3000  Prometheus :9090"
+else
+  log "============================================================================"
+  log "BACKEND NOT READY: vLLM did not come up on :${VLLM_PORT} (model server is DOWN)."
+  log "The dashboard and support services started, but the agent cells WILL FAIL with"
+  log "a 'Connection error' because there is no model to connect to. Check /root/vllm.log"
+  log "(common cause: not enough disk for the ~60 GB weights). Fix, then re-run this cell."
+  log "============================================================================"
+fi
