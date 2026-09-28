@@ -1,34 +1,50 @@
 #!/usr/bin/env bash
 # One-shot backend setup for the single-container tutorial. Started from the
-# notebook (Environment setup, step 2). Everything runs under the system
+# notebook (Environment setup, step 4). Everything runs under the system
 # python3 that already carries vLLM / PyTorch / ROCm in the official image.
+#
+# CONFIGURATION IS DRIVEN FROM THE ENVIRONMENT. The tutorial notebook sets the
+# knobs below (model, service ports, GPU memory fraction, OTEL pins) and the
+# Python packages in a readable "configure the backend" cell, then runs this
+# script. Every value here falls back to a sensible default, so the script also
+# runs standalone: `bash utils/setup_backend.sh`.
 set -uo pipefail
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
-HERMES_MODEL="meta-models/Muse-Glimmer-30B"
-VLLM_PORT=8001
-MLFLOW_PORT=5004
-PROM_PORT=9090
-GRAFANA_PORT=3000
+HERMES_MODEL="${HERMES_MODEL:-meta-models/Muse-Glimmer-30B}"
+VLLM_PORT="${VLLM_PORT:-8001}"
+MLFLOW_PORT="${MLFLOW_PORT:-5004}"
+PROM_PORT="${PROM_PORT:-9090}"
+GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.80}"
 export PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore DEBIAN_FRONTEND=noninteractive
 
-# --- OS + Python packages the official image does not ship -----------------
+# OpenTelemetry pins. The official vLLM image ships a coherent opentelemetry
+# 1.40.0 stack, and lmcache (installed in the image) caps opentelemetry-api at
+# <=1.40.0. Pin the whole otel stack to 1.40.0 so pip's resolver stays
+# consistent; bumping only a couple of otel packages leaves the rest at 1.40.0
+# and breaks pip check. The notebook exports OTEL_PINS; this default keeps the
+# script self-contained when it is run on its own.
+OTEL_PINS="${OTEL_PINS:-opentelemetry-api==1.40.0 opentelemetry-sdk==1.40.0 opentelemetry-proto==1.40.0 opentelemetry-semantic-conventions==0.61b0 opentelemetry-exporter-otlp-proto-common==1.40.0 opentelemetry-exporter-otlp-proto-grpc==1.40.0 opentelemetry-exporter-otlp-proto-http==1.40.0 opentelemetry-exporter-otlp==1.40.0}"
+
+# --- OS audio packages the official image does not ship --------------------
 log "Installing OS audio packages for Kokoro..."
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq espeak-ng libsndfile1 procps lsof ripgrep >/dev/null 2>&1 || true
 
-log "Installing Python packages (Kokoro, MLflow, dashboard, telemetry)..."
-# OpenTelemetry: the official vLLM image ships a coherent opentelemetry 1.40.0
-# stack, and lmcache (installed in the image) caps opentelemetry-api at <=1.40.0.
-# Pin the whole otel stack to 1.40.0 so pip's resolver stays consistent; bumping
-# only a couple of otel packages leaves the rest at 1.40.0 and breaks pip check.
-OTEL_PINS="opentelemetry-api==1.40.0 opentelemetry-sdk==1.40.0 opentelemetry-proto==1.40.0 opentelemetry-semantic-conventions==0.61b0 opentelemetry-exporter-otlp-proto-common==1.40.0 opentelemetry-exporter-otlp-proto-grpc==1.40.0 opentelemetry-exporter-otlp-proto-http==1.40.0 opentelemetry-exporter-otlp==1.40.0"
-python3 -m pip install -q \
-  kokoro soundfile fastapi "uvicorn[standard]" \
-  "streamlit>=1.30" "mlflow>=3.0.0" plotly pandas ipywidgets matplotlib kaleido \
-  ${OTEL_PINS} \
-  psutil requests
+# --- Python packages -------------------------------------------------------
+# The notebook's configuration cell installs these before running this script.
+# Install them here too when they are missing, so a standalone run still works;
+# in the notebook flow the import check passes and this block is skipped (no
+# duplicate output).
+if ! python3 -c 'import streamlit, mlflow, kokoro' >/dev/null 2>&1; then
+  log "Installing Python packages (Kokoro, MLflow, dashboard, telemetry)..."
+  python3 -m pip install -q \
+    kokoro soundfile fastapi "uvicorn[standard]" \
+    "streamlit>=1.30" "mlflow>=3.0.0" plotly pandas ipywidgets matplotlib kaleido \
+    ${OTEL_PINS} \
+    psutil requests
+fi
 
 # --- Metrics: upstream Prometheus (native OTLP receiver) + Grafana ---------
 # Resolve the latest upstream releases so the tutorial tracks current versions.
