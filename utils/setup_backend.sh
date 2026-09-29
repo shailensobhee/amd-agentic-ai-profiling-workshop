@@ -11,6 +11,14 @@
 set -uo pipefail
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
+# Absolute path to utils/ resolved at invocation, BEFORE any `cd`. The script
+# `cd /root` partway through, so a later relative `cd utils` (for the Streamlit
+# dashboard) would fail with "utils: No such file or directory" and the :8501
+# dashboard would never bind. Resolve it from this script's own location so the
+# dashboard launch is CWD-independent. UTILS_DIR may still be overridden by the
+# environment.
+UTILS_DIR="${UTILS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+
 HERMES_MODEL="${HERMES_MODEL:-meta-models/Muse-Glimmer-30B}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 MLFLOW_PORT="${MLFLOW_PORT:-5004}"
