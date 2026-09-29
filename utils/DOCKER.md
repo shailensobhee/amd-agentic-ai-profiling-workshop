@@ -22,7 +22,7 @@ nested Docker and no host setup beyond the GPU devices.
 
 | Component | Port | Notes |
 | :--- | :--- | :--- |
-| JupyterLab | `8888` | The workshop front door. Open `tts.ipynb`. |
+| JupyterLab | `8888` | The workshop front door. Open `agentic_ai_profiling.ipynb`. |
 | Telemetry dashboard (Streamlit) | `8501` | Spans, CPU/GPU timeline, tool breakdown. |
 | MLflow tracking server | `5004` | The agent's execution traces. |
 | Grafana `otel-lgtm` | `9090` / `3000` | CPU/GPU metrics (Prometheus on 9090, queried by the dashboard; Grafana UI on 3000). |
@@ -88,7 +88,7 @@ docker logs -f amd-agentic-ai-profiling
 ```
 
 When the log prints `All services are ready`, open
-`http://<host>:8888/lab/tree/tts.ipynb`.
+`http://<host>:8888/lab/tree/agentic_ai_profiling.ipynb`.
 
 > **First start downloads about 60 GB of model weights.** Mounting the Hugging
 > Face cache as shown means the download is paid once per host, not once per

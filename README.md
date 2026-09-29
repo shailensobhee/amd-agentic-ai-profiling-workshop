@@ -57,8 +57,8 @@ The default TTS uses Edge TTS, which has some limitations. We therefore use a lo
 
 | Path | What it is |
 | :--- | :--- |
-| `tts.ipynb` | **The workshop notebook.** Start here. |
-| `tts_executed.ipynb` | The same notebook with all cells already executed, so you can read the expected outputs without a GPU. |
+| `agentic_ai_profiling.ipynb` | **The workshop notebook.** Start here. |
+| `agentic_ai_profiling_executed.ipynb` | The same notebook with all cells already executed, so you can read the expected outputs without a GPU. |
 | `utils/helper.sh` | One-shot launcher for the full backend (agent, telemetry, dashboard). |
 | `utils/kokoro_server.py` | The local Kokoro TTS server (FastAPI + Uvicorn), including the batched inference path. |
 | `utils/start_kokoro_server.sh` | Launches the Kokoro TTS server and waits until it answers `/health`. The notebook triggers it for the local Kokoro runs the optimization builds on. |
@@ -68,7 +68,7 @@ The default TTS uses Edge TTS, which has some limitations. We therefore use a lo
 | `custom_tools/kokoro_tts_tool.py` | The custom `kokoro_tts` tool added to Hermes. |
 | `utils/Dockerfile`, `utils/docker-entrypoint.sh` | Build and run the all-in-one workshop container. See [utils/DOCKER.md](utils/DOCKER.md). |
 | `assets/` | Diagrams, dashboard screenshots, and reference outputs. |
-| `scripts/` | Generators that rebuild the diagrams and the notebook. |
+| `scripts/` | Generator that rebuilds the concept diagrams. |
 
 ---
 
@@ -116,7 +116,7 @@ docker run -d --name amd-agentic-ai-profiling \
 > - omit it &rarr; the AMD hosted-notebook proxy `https://notebooks.amd.com/<hostname>/proxy/<port>/`
 
 Watch it start with `docker logs -f amd-agentic-ai-profiling`. When it prints
-`All services are ready`, open `http://<host>:8888/lab/tree/tts.ipynb`.
+`All services are ready`, open `http://<host>:8888/lab/tree/agentic_ai_profiling.ipynb`.
 
 The first start downloads about 60 GB of model weights, so mount the Hugging
 Face cache as shown to pay that cost only once. Full details, flags and
@@ -168,7 +168,7 @@ bash utils/helper.sh
 jupyter lab --ip=0.0.0.0 --port=8888 --no-browser
 ```
 
-Open **`tts.ipynb`** and work through it top to bottom. Everything from here on
+Open **`agentic_ai_profiling.ipynb`** and work through it top to bottom. Everything from here on
 happens inside the notebook. Pick the link base from the dropdown in the notebook's Step 2 cell (defaults to the value you set in step 4, if this is the same terminal).
 
 <details>
@@ -240,14 +240,11 @@ After `utils/helper.sh` is running, these are reachable on the host (replace `<s
 
 ## Regenerating the assets
 
-The notebook and its diagrams are generated from scripts so they stay reproducible and reviewable:
+The concept diagrams are generated from a script so they stay reproducible and reviewable:
 
 ```bash
 python scripts/build_diagrams.py       # rebuild the AMD-branded concept diagrams
-python scripts/build_tts_notebook.py   # regenerate tts.ipynb from the generator
 ```
-
-The generator reuses the workshop's backend-driving code cells verbatim, so editing the prose can never change what the notebook actually runs.
 
 ---
 

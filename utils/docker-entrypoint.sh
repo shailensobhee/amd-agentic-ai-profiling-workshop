@@ -342,7 +342,7 @@ PYPROBE
     log "==================================================================="
     log " All services are ready."
     log "==================================================================="
-    log "  JupyterLab (start here) : $(service_url "${JUPYTER_PORT}")lab/tree/tts.ipynb"
+    log "  JupyterLab (start here) : $(service_url "${JUPYTER_PORT}")lab/tree/agentic_ai_profiling.ipynb"
     log "  Telemetry dashboard     : $(service_url "${DASHBOARD_PORT}")"
     log "  MLflow UI               : $(service_url "${MLFLOW_PORT}")"
     log "  vLLM OpenAI API         : $(service_url "${VLLM_HERMES_PORT}")v1"
