@@ -11,6 +11,10 @@
 set -uo pipefail
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
+# This script's own directory (utils/), resolved before anything changes
+# directory, so the dashboard launch below finds it from wherever we are.
+UTILS_DIR="${UTILS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+
 HERMES_MODEL="${HERMES_MODEL:-meta-models/Muse-Glimmer-30B}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 MLFLOW_PORT="${MLFLOW_PORT:-5004}"
@@ -133,6 +137,9 @@ nohup python3 -m mlflow server --host 0.0.0.0 --port ${MLFLOW_PORT} \
   --backend-store-uri sqlite:////root/mlflow.db --allowed-hosts '*' > /root/mlflow.log 2>&1 &
 
 # --- Hermes + hermes-otel plugin -------------------------------------------
+# The installer puts the hermes launcher in ~/.local/bin, which is not on PATH
+# in the container; without it every `hermes config set` below fails silently.
+export PATH="${HOME}/.local/bin:${PATH}"
 if ! command -v hermes >/dev/null 2>&1; then
   log "Installing the Hermes agent..."
   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup >/dev/null 2>&1 || true
@@ -159,7 +166,14 @@ for cand in (py, "/usr/local/lib/hermes-agent/venv/bin/python",
         print(cand); break
 PY
 )"
-log "Hermes venv python: ${HVPY:-not found}"
+# Current installers have no venv: hermes runs a bundled Python, which the
+# launcher reports as the first element of its runtime command.
+if [ -z "${HVPY}" ] && command -v hermes >/dev/null 2>&1; then
+  HVPY="$(hermes --print-runtime-command 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)[0])' 2>/dev/null || true)"
+  [ -x "${HVPY}" ] || HVPY=""
+fi
+log "Hermes python: ${HVPY:-not found}"
 if [ -n "${HVPY}" ]; then
   "${HVPY}" -m ensurepip --upgrade >/dev/null 2>&1 || {
     curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /root/get-pip.py && "${HVPY}" /root/get-pip.py >/dev/null 2>&1; }
@@ -244,7 +258,7 @@ fi
 # theme is silently dropped. Port 8501 matches the links the notebook prints.
 log "Launching the profiling dashboard on :8501..."
 pkill -f "streamlit run" 2>/dev/null || true; sleep 1
-( cd "${UTILS_DIR:-utils}" 2>/dev/null || cd utils
+( cd "${UTILS_DIR}"
   nohup "$(command -v streamlit)" run hermes_profiler.py \
     --server.address 0.0.0.0 --server.port 8501 --server.headless true \
     > /root/streamlit_dashboard.log 2>&1 & )
