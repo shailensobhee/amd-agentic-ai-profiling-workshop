@@ -656,18 +656,25 @@ fi
 
 # Resolve the Hermes installation, whichever layout this machine uses:
 # a per-user install (~/.hermes/hermes-agent) or a system one (/usr/local).
-# Require both tools/ and venv/bin/python, since the verification step below
-# runs that interpreter.
 HERMES_ROOT=""
 for cand in "$HOME/.hermes/hermes-agent" /usr/local/lib/hermes-agent; do
-    if [ -x "$cand/venv/bin/python" ] && [ -d "$cand/tools" ]; then
+    if [ -d "$cand/tools" ]; then
         HERMES_ROOT="$cand"
         break
     fi
 done
 
-if [ -z "$HERMES_ROOT" ]; then
-    echo "[ERROR] Could not find a complete Hermes install (tools/ + venv/)."
+# The Python that runs Hermes, for the verification step below: older installs
+# have a venv; newer ones bundle their own Python, which the launcher names.
+export PATH="$HOME/.local/bin:$PATH"
+HERMES_PY="$HERMES_ROOT/venv/bin/python"
+if [ -n "$HERMES_ROOT" ] && [ ! -x "$HERMES_PY" ]; then
+    HERMES_PY=$(hermes --print-runtime-command 2>/dev/null \\
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])' 2>/dev/null)
+fi
+
+if [ -z "$HERMES_ROOT" ] || [ ! -x "$HERMES_PY" ]; then
+    echo "[ERROR] Could not find a complete Hermes install (tools/ and its Python)."
     echo "        Has hermes finished installing?"
     exit 1
 fi
@@ -677,8 +684,12 @@ cp "$SRC" "$HERMES_ROOT/tools/"
 echo "[OK] Copied kokoro_tts_tool.py -> $HERMES_ROOT/tools/"
 
 # Verify the tool registers, not just that the file copied.
-"$HERMES_ROOT/venv/bin/python" -c "
+"$HERMES_PY" -c "
 import sys; sys.path.insert(0, '$HERMES_ROOT')
+try:
+    import hermes_bootstrap  # sets up the bundled-Python installs
+except ImportError:
+    pass
 from tools.registry import registry
 import tools.kokoro_tts_tool
 names = getattr(registry, 'tools', None) or getattr(registry, '_tools', {})
